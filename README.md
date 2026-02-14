@@ -1,5 +1,15 @@
 # Course Material QA Chatbot 🚀
 
+# Jisko jo features add karna h jo karna h karo 
+and abhi filhaal full architecture ke saath nhi h ( please ignore - `agents/` (Advanced microservice agents)
+- `api/` (Complex router structure)
+- `core/` (Deep infrastructure)
+- `db/` (SQLAlchemy ORM models)
+- `services/` (External service connectors)
+- `workers/` (Celery background tasks) ) 
+like working code of backend is in Production_agentic.py me h and frontend ( react with ts ) frontend folder me h #
+#  if you want to change pipeline, want to experiment somthing pull the code in local implement run and pull #
+
 > **Current Status:** this pipeline uses `production_agentic.py` (Standalone Agentic Server) which implements the full RAG pipeline without complex microservice dependencies.
 
 ## 🌟 Key Innovations
