@@ -1,6 +1,6 @@
-# Production-Grade Course Material QA Chatbot 🚀
+# Course Material QA Chatbot 🚀
 
-> **Current Status:** The active production pipeline uses `production_agentic.py` (Standalone Agentic Server) which implements the full RAG pipeline without complex microservice dependencies.
+> **Current Status:** this pipeline uses `production_agentic.py` (Standalone Agentic Server) which implements the full RAG pipeline without complex microservice dependencies.
 
 ## 🌟 Key Innovations
 
