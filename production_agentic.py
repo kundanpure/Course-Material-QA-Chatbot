@@ -33,7 +33,7 @@ genai.configure(api_key=GEMINI_API_KEY)
 # FastAPI app
 app = FastAPI(
     title="Production Agentic RAG Backend",
-    description="Full Agentic Pipeline: Query Classifier → Retrieval Strategy → Answer Composer → Validator",
+    description="Full Agentic Pipeline: Query Classifier -> Retrieval Strategy -> Answer Composer -> Validator",
     version="3.0.0"
 )
 
@@ -58,9 +58,9 @@ async def startup_event():
     if db_available:
         # Load existing documents from database
         documents_store = await db.get_all_documents()
-        print(f"[STARTUP] ✅ Loaded {len(documents_store)} documents from PostgreSQL")
+        print(f"[STARTUP] [OK] Loaded {len(documents_store)} documents from PostgreSQL")
     else:
-        print("[STARTUP] ⚠️ PostgreSQL not available, using in-memory storage")
+        print("[STARTUP] [WARN] PostgreSQL not available, using in-memory storage")
 
 @app.on_event("shutdown")
 async def shutdown_event():
@@ -214,10 +214,10 @@ async def root():
         "service": "Production Agentic RAG Backend",
         "version": "3.0.0",
         "agentic_pipeline": {
-            "query_classifier": "✅ Active",
-            "retrieval_strategy": "✅ Adaptive (vector/hybrid)",
-            "answer_composer": "✅ Gemini + Citations",
-            "answer_validator": "✅ Confidence scoring"
+            "query_classifier": "[OK] Active",
+            "retrieval_strategy": "[OK] Adaptive (vector/hybrid)",
+            "answer_composer": "[OK] Gemini + Citations",
+            "answer_validator": "[OK] Confidence scoring"
         },
         "features": [
             "Query Type Classification",
@@ -275,7 +275,7 @@ async def upload_document(file: UploadFile = File(...)):
         # Save to PostgreSQL (if available)
         await db.save_document(doc_id, file.filename, text, chunks, page_count)
         
-        print(f"[UPLOAD] ✅ {file.filename} - {page_count} pages, {len(chunks)} chunks")
+        print(f"[UPLOAD] [OK] {file.filename} - {page_count} pages, {len(chunks)} chunks")
         
         return {
             "status": "success",
@@ -309,7 +309,7 @@ async def ask_question(request: QueryRequest):
         classification = classify_query(request.query)
         query_type = classification["type"]
         strategy = classification["strategy"]
-        print(f"  → Type: {query_type.upper()}, Strategy: {strategy}")
+        print(f"  -> Type: {query_type.upper()}, Strategy: {strategy}")
         
         # STEP 2: Retrieval Strategy
         print(f"[2/5] RETRIEVAL (Strategy: {strategy})...")
@@ -324,7 +324,7 @@ async def ask_question(request: QueryRequest):
         all_chunks.sort(key=lambda x: x.get("score", 0), reverse=True)
         top_chunks = all_chunks[:3]
         retrieval_time = (time.time() - retrieval_start) * 1000
-        print(f"  → Retrieved: {len(all_chunks)}, Used: {len(top_chunks)}")
+        print(f"  -> Retrieved: {len(all_chunks)}, Used: {len(top_chunks)}")
         
         # STEP 3: Build Context
         print("[3/5] CONTEXT BUILDING...")
@@ -349,7 +349,7 @@ async def ask_question(request: QueryRequest):
         ]
         
         confidence = calculate_confidence(result["answer"], citations, len(top_chunks))
-        print(f"  → Confidence: {confidence:.2f}")
+        print(f"  -> Confidence: {confidence:.2f}")
         
         total_time = (time.time() - total_start) * 1000
         

@@ -77,11 +77,11 @@ async def init_db():
         async with db_pool.acquire() as conn:
             await conn.execute(CREATE_TABLES_SQL)
         
-        print("[DB] ✅ PostgreSQL connected and tables initialized")
+        print("[DB] [OK] PostgreSQL connected and tables initialized")
         return True
         
     except Exception as e:
-        print(f"[DB] ❌ Failed to initialize database: {e}")
+        print(f"[DB] [ERROR] Failed to initialize database: {e}")
         db_pool = None
         return False
 
