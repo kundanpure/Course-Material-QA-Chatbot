@@ -1,397 +1,107 @@
 # Production-Grade Course Material QA Chatbot 🚀
 
+> **Current Status:** The active production pipeline uses `production_agentic.py` (Standalone Agentic Server) which implements the full RAG pipeline without complex microservice dependencies.
+
 ## 🌟 Key Innovations
 
-This is **NOT** your typical RAG system. This project implements cutting-edge techniques that set it apart:
-
-### 1. **GraphRAG - Hybrid Knowledge Retrieval**
-- Combines Vector Search + Keyword Search + Knowledge Graph traversal
-- Perfect for complex queries requiring multi-hop reasoning
-- Example: "How does Module A relate to Module B?" → Traverses graph relationships
-
-### 2. **Semantic Caching with GPTCache**
-- Zero-latency responses for semantically similar queries
-- Similarity-based matching (not exact string match)
-- Example: "What is ML?" and "Explain machine learning" → Same cache hit
-
-### 3. **Self-Healing Query Pipeline**
-- Automatic answer validation using a Judge agent
-- Retries with different strategies if answer quality is low
-- Adaptive strategy selection based on query type
-
-### 4. **Circuit Breaker Pattern**
-- Automatic failover from OpenAI → Groq (or other providers)
-- Prevents cascade failures when primary LLM is down
-- Implements CLOSED → OPEN → HALF_OPEN states
-
-### 5. **Multi-Tenant Data Isolation**
-- Secure tenant filtering at database level (Qdrant payload filters)
-- JWT-based authentication with RBAC
-- No data leakage between organizations
-
-### 6. **Prompt Injection Shield**
-- ML-based detection of malicious prompts
-- Pattern matching + heuristic analysis
-- Blocks attacks like "Ignore previous instructions"
-
-### 7. **Active Learning Loop**
-- Collects user feedback (thumbs up/down)
-- Automatically creates training datasets
-- Enables periodic reranker fine-tuning
-
-### 8. **Deep Observability**
-- Full request tracing with LangSmith/Jaeger
-- Prometheus metrics (latency p99, token cost, hallucination rate)
-- Circuit breaker state monitoring
+This project implements cutting-edge RAG techniques:
+- **Agentic Pipeline:** Query Classifier → Retrieval Strategy → Answer Composer → Validator
+- **Deep Research:** Hybrid search (Vector + Keyword)
+- **Self-Healing:** Automatic retries and strategy adaptation
+- **Semantic Caching:** Instant responses for similar queries
+- **Data Persistence:** PostgreSQL storage for documents and history
 
 ---
 
-## 🏗️ Architecture
+## 🚀 Quick Start (Current Working Version)
 
-```
-┌─────────────────────────────────────────────────────────────────┐
-│                    API Gateway & Auth Layer                      │
-│  ┌──────────────┐  ┌────────────────┐  ┌───────────────────┐  │
-│  │ Rate Limiter │→ │ Prompt Shield  │→ │ Circuit Breaker   │  │
-│  └──────────────┘  └────────────────┘  └───────────────────┘  │
-└─────────────────────────────────────────────────────────────────┘
-                              ↓
-┌─────────────────────────────────────────────────────────────────┐
-│                    Semantic Cache (Redis)                        │
-│              ⚡ Check if query was answered before               │
-└─────────────────────────────────────────────────────────────────┘
-                              ↓
-┌─────────────────────────────────────────────────────────────────┐
-│                    Agentic Orchestrator                          │
-│  ┌─────────────┐  ┌──────────────┐  ┌────────────────────┐    │
-│  │ Classifier  │→ │   Retrieval  │→ │   Answer Composer  │    │
-│  │ (Query Type)│  │   Strategy   │  │   (LLM + Citations)│    │
-│  └─────────────┘  └──────────────┘  └────────────────────┘    │
-│                          ↓                      ↓                │
-│                    ┌──────────┐          ┌──────────┐          │
-│                    │ Reranker │          │Validator │          │
-│                    └──────────┘          └──────────┘          │
-└─────────────────────────────────────────────────────────────────┘
-                              ↓
-┌─────────────────────────────────────────────────────────────────┐
-│              Retrieval Layer - GraphRAG                          │
-│  ┌──────────────┐  ┌──────────────┐  ┌───────────────────┐    │
-│  │Vector DB     │  │Knowledge Graph│  │  Sparse Index     │    │
-│  │(Qdrant)      │  │(Neo4j)        │  │  (Keyword BM25)   │    │
-│  └──────────────┘  └──────────────┘  └───────────────────┘    │
-└─────────────────────────────────────────────────────────────────┘
-```
+Follow these steps to run the specialized agentic pipeline.
 
----
+### 1. Backend Setup
 
-## 🚀 Quick Start
+The backend runs a standalone agentic server (`production_agentic.py`) that handles the entire RAG pipeline.
 
-### Prerequisites
+**Prerequisites:**
 - Python 3.11+
-- PostgreSQL 15+
-- Redis 7+
-- Qdrant (Vector DB)
-- Neo4j (Knowledge Graph)
-- Docker & Docker Compose (recommended)
+- PostgreSQL (NeonDB is configured in `.env`)
 
-### 1. Clone & Install
-
+**Installation:**
 ```bash
-git clone <repo-url>
-cd course-qa-chatbot
-python -m venv venv
-source venv/bin/activate  # On Windows: venv\Scripts\activate
-pip install -r requirements.txt
+# 1. Navigate to backend root
+cd backend
+
+# 2. Install required libraries
+pip install fastapi uvicorn google-generativeai pypdf python-dotenv asyncpg psycopg2-binary sqlalchemy
+
+# 3. Security & Code Sanitization (Optional but recommended for Windows)
+python sanitize_code.py
+
+# 4. Run the Production Server
+python production_agentic.py
 ```
 
-### 2. Environment Configuration
+The server will start at `http://localhost:8000`.
+- **Docs:** `http://localhost:8000/docs`
+- **Health:** `http://localhost:8000/api/v1/health`
 
-Create `.env` file:
+### 2. Frontend Setup
 
+The frontend is a modern React + Vite application located in the `frontend/` directory.
+
+**Installation:**
 ```bash
-# Application
-SECRET_KEY=your-super-secret-key-here
-DEBUG=False
-ENVIRONMENT=production
+# 1. Navigate to frontend (from backend root)
+cd frontend
 
-# Database
-POSTGRES_HOST=localhost
-POSTGRES_PORT=5432
-POSTGRES_USER=postgres
-POSTGRES_PASSWORD=your-password
-POSTGRES_DB=course_qa
+# 2. Install dependencies
+npm install
 
-# Redis
-REDIS_HOST=localhost
-REDIS_PORT=6379
-REDIS_PASSWORD=your-redis-password
-
-# Qdrant Vector DB
-QDRANT_HOST=localhost
-QDRANT_PORT=6333
-QDRANT_API_KEY=your-qdrant-key
-
-# Neo4j Knowledge Graph
-NEO4J_URI=bolt://localhost:7687
-NEO4J_USER=neo4j
-NEO4J_PASSWORD=your-neo4j-password
-
-# LLM Providers
-OPENAI_API_KEY=sk-...
-GROQ_API_KEY=gsk_...  # Fallback provider
-ANTHROPIC_API_KEY=sk-ant-...  # Optional
-
-# Celery
-CELERY_BROKER_URL=redis://localhost:6379/1
-CELERY_RESULT_BACKEND=redis://localhost:6379/2
-
-# S3 Storage
-S3_BUCKET_NAME=course-materials
-AWS_ACCESS_KEY_ID=your-access-key
-AWS_SECRET_ACCESS_KEY=your-secret-key
-
-# Observability
-LANGSMITH_API_KEY=ls_...
+# 3. Start Development Server
+npm run dev
 ```
 
-### 3. Docker Compose (Recommended)
+The frontend will start at `http://localhost:5173`.
+*Make sure your Tailwind CSS is working and aligned with the needed version (v3.4+ recommended).*
 
-```bash
-docker-compose up -d
-```
+---
 
-This starts:
-- PostgreSQL
-- Redis
-- Qdrant
-- Neo4j
-- Prometheus
-- Grafana
+## 📂 Project Structure Note
 
-### 4. Database Migration
+For the current working version, please **IGNORE** the following folders:
+- `agents/` (Advanced microservice agents)
+- `api/` (Complex router structure)
+- `core/` (Deep infrastructure)
+- `db/` (SQLAlchemy ORM models)
+- `services/` (External service connectors)
+- `workers/` (Celery background tasks)
 
-```bash
-alembic upgrade head
-```
+These folders contain the **Advanced Enterprise Version** (Microservices Architecture) which is reserved for future scaling. For now, all logic is consolidated in `production_agentic.py` for ease of deployment and maintenance.
 
-### 5. Start Services
+---
 
-**API Server:**
-```bash
-uvicorn app.main:app --host 0.0.0.0 --port 8000 --workers 4
-```
+## 🏗️ Architecture (Visual)
 
-**Celery Worker (for document ingestion):**
-```bash
-celery -A app.workers.ingestion_worker worker --loglevel=info
-```
-
-**Flower (Celery Monitoring):**
-```bash
-celery -A app.workers.ingestion_worker flower --port=5555
+```mermaid
+graph TB
+    User[User Question] --> Step1[1. Query Classifier]
+    Step1 --> Step2[2. Retrieval Strategy]
+    Step2 --> Step3[3. Document Retrieval (PostgreSQL)]
+    Step3 --> Step4[4. Answer Composer (Gemini)]
+    Step4 --> Step5[5. Validator & Confidence]
+    Step5 --> Response[Final Response]
 ```
 
 ---
 
-## 📚 API Documentation
+## 🔧 Configuration (.env)
 
-Once running, visit:
-- **Swagger UI:** http://localhost:8000/api/docs
-- **ReDoc:** http://localhost:8000/api/redoc
-
-### Key Endpoints
-
-#### 1. Query Endpoint
-```bash
-POST /api/v1/query/ask
-Content-Type: application/json
-Authorization: Bearer <jwt-token>
-
-{
-  "query": "What is the difference between supervised and unsupervised learning?",
-  "conversation_history": []
-}
-
-Response:
-{
-  "answer": "Supervised learning uses labeled data...",
-  "citations": [
-    {
-      "text": "Supervised learning requires...",
-      "source": "ML_Course_Chapter3.pdf",
-      "page": 15
-    }
-  ],
-  "confidence": 0.92,
-  "metadata": {
-    "query_type": "COMPARISON",
-    "retrieval_strategy": "graph_enhanced",
-    "chunks_retrieved": 10,
-    "chunks_used": 3,
-    "total_time_ms": 1247
-  }
-}
+Ensure your `.env` file in the `backend/` root has:
+```env
+GEMINI_API_KEY=AIzaSy...
+POSTGRES_HOST=...
+POSTGRES_USER=...
+POSTGRES_PASSWORD=...
+POSTGRES_DB=neondb
+DATABASE_URL=postgresql://...
 ```
-
-#### 2. Document Upload
-```bash
-POST /api/v1/admin/upload
-Authorization: Bearer <jwt-token>
-Content-Type: multipart/form-data
-
-Form Data:
-- file: <course_material.pdf>
-- metadata: {"course": "ML101", "chapter": 3}
-
-Response:
-{
-  "task_id": "abc-123",
-  "status": "processing",
-  "message": "Document queued for ingestion"
-}
-```
-
-#### 3. Feedback
-```bash
-POST /api/v1/feedback
-{
-  "query_id": "query-uuid",
-  "rating": "positive",  # or "negative"
-  "comment": "Great answer!"
-}
-```
-
----
-
-## 🧪 Testing
-
-```bash
-# Run all tests
-pytest
-
-# With coverage
-pytest --cov=app --cov-report=html
-
-# Specific test file
-pytest tests/test_retrieval.py -v
-```
-
----
-
-## 📊 Monitoring
-
-### Prometheus Metrics
-Access at: http://localhost:9090
-
-Key metrics:
-- `http_requests_total` - Total requests
-- `http_request_duration_seconds` - Latency distribution
-- `circuit_breaker_state` - CB state (0=closed, 1=open)
-- `cache_hit_ratio` - Semantic cache performance
-- `llm_tokens_used_total` - Token consumption
-- `retrieval_documents_retrieved` - Retrieval stats
-
-### Grafana Dashboards
-Access at: http://localhost:3000 (default: admin/admin)
-
-Pre-built dashboards:
-- API Performance
-- LLM Cost Tracking
-- Cache Efficiency
-- Circuit Breaker Status
-
-### LangSmith Tracing
-View detailed traces at: https://smith.langchain.com
-
----
-
-## 🏆 What Makes This Different?
-
-| Feature | Typical RAG | This Project |
-|---------|------------|--------------|
-| **Caching** | String-based or none | Semantic similarity-based |
-| **Retrieval** | Single vector search | Hybrid + Knowledge Graph |
-| **Reliability** | Fails on LLM errors | Circuit breaker + fallback |
-| **Quality Control** | None | Answer validation + retry |
-| **Multi-tenancy** | Application-level | Database-level isolation |
-| **Security** | Basic | Prompt injection detection |
-| **Learning** | Static | Active learning from feedback |
-
----
-
-## 🔧 Customization
-
-### Add Custom Retrieval Strategy
-
-```python
-# app/agents/retrieval_strategy.py
-
-async def _custom_strategy(self, query, tenant_id, top_k):
-    # Your custom logic
-    results = await your_search_method(query)
-    return results
-```
-
-### Add Custom LLM Provider
-
-```python
-# app/services/llm_router.py
-
-class CustomProvider:
-    async def chat(self, messages, **kwargs):
-        # Your provider logic
-        pass
-
-# Register in LLMRouter
-self.providers["custom"] = CustomProvider()
-```
-
----
-
-## 📈 Performance Benchmarks
-
-| Metric | Value |
-|--------|-------|
-| **Avg Latency (p50)** | 850ms |
-| **Avg Latency (p99)** | 2.1s |
-| **Cache Hit Rate** | 35-40% |
-| **Token Cost per Query** | $0.003 |
-| **Concurrent Users** | 1000+ |
-| **Uptime (with CB)** | 99.95% |
-
----
-
-## 🤝 Contributing
-
-1. Fork the repository
-2. Create feature branch (`git checkout -b feature/AmazingFeature`)
-3. Commit changes (`git commit -m 'Add AmazingFeature'`)
-4. Push to branch (`git push origin feature/AmazingFeature`)
-5. Open Pull Request
-
----
-
-## 📝 License
-
-MIT License - see LICENSE file
-
----
-
-## 🙏 Acknowledgments
-
-- LangChain for agent frameworks
-- Qdrant for vector database
-- OpenAI for embeddings & LLMs
-- Anthropic for Claude models
-
----
-
-## 📞 Support
-
-- **Documentation:** [Full Docs](docs/)
-- **Issues:** [GitHub Issues](issues)
-- **Discussions:** [GitHub Discussions](discussions)
-
----
-
-**Built with ❤️ for Production**
+*(Credentials are pre-configured for the current environment)*
