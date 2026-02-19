@@ -6,7 +6,7 @@ const API_BASE_URL = import.meta.env.VITE_API_URL || 'http://localhost:8000';
 // Create axios instance with default configuration
 const apiClient = axios.create({
     baseURL: API_BASE_URL,
-    timeout: 30000, // 30 seconds for document uploads
+    timeout: 120000, // 120s — study/research modes can take longer
     headers: {
         'Content-Type': 'application/json',
     },
@@ -16,13 +16,9 @@ const apiClient = axios.create({
 // Request interceptor - Add auth tokens, request ID, etc.
 apiClient.interceptors.request.use(
     (config) => {
-        // Add tenant/user context (mock for now, replace with real auth)
         config.headers['X-Tenant-ID'] = 'demo-tenant';
         config.headers['X-User-ID'] = 'demo-user';
-
-        // Add request ID for tracing
         config.headers['X-Request-ID'] = `req-${Date.now()}-${Math.random().toString(36).substring(7)}`;
-
         return config;
     },
     (error) => {
@@ -36,23 +32,16 @@ apiClient.interceptors.response.use(
         return response;
     },
     (error) => {
-        // Handle common errors
         if (error.response) {
-            // Server responded with error status
             console.error('API Error:', error.response.status, error.response.data);
-
             if (error.response.status === 401) {
-                // Handle unauthorized - redirect to login, etc.
                 console.error('Unauthorized - Please login');
             }
         } else if (error.request) {
-            // Request made but no response
             console.error('Network Error: No response from server');
         } else {
-            // Something else happened
             console.error('Request Error:', error.message);
         }
-
         return Promise.reject(error);
     }
 );
@@ -68,10 +57,13 @@ export interface Message {
     content: string;
 }
 
+export type PipelineMode = 'auto' | 'fast' | 'study' | 'research' | 'chat';
+
 export interface QueryRequest {
     query: string;
     conversation_history?: Message[];
     options?: Record<string, any>;
+    mode?: PipelineMode;
 }
 
 export interface Citation {
@@ -84,6 +76,7 @@ export interface Citation {
 export interface QueryMetadata {
     query_type?: string;
     retrieval_strategy: string;
+    pipeline_mode?: PipelineMode;
     chunks_retrieved: number;
     chunks_used: number;
     attempts: number;
