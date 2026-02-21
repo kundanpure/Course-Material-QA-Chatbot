@@ -10,8 +10,9 @@ import {
     FlaskConical,
     MessageCircle,
     Cpu,
-    ChevronDown,
 } from 'lucide-react';
+import { askQuestion, uploadDocument, createSession, getSessionMessages, type ChatSession } from '../services/api';
+import MarkdownRenderer from '../components/MarkdownRenderer';
 
 // ─── Types ─────────────────────────────────────────────────────────────────────
 
@@ -90,9 +91,16 @@ const LOADING_TEXT: Record<PipelineMode, string> = {
     chat: 'Thinking…',
 };
 
+// ─── Props ─────────────────────────────────────────────────────────────────────
+
+interface ChatPageProps {
+    sessionId: number | null;
+    onSessionCreated: (session: ChatSession) => void;
+}
+
 // ─── Main Component ────────────────────────────────────────────────────────────
 
-export default function ChatPage() {
+export default function ChatPage({ sessionId, onSessionCreated }: ChatPageProps) {
     const [messages, setMessages] = useState<Message[]>([
         {
             role: 'assistant',
@@ -105,12 +113,55 @@ export default function ChatPage() {
     const [uploadedFile, setUploadedFile] = useState<File | null>(null);
     const [selectedMode, setSelectedMode] = useState<PipelineMode>('auto');
     const [showModeMenu, setShowModeMenu] = useState(false);
+    const [currentSessionId, setCurrentSessionId] = useState<number | null>(sessionId);
+    const [uploadedDocIds, setUploadedDocIds] = useState<string[]>([]);
     const messagesEndRef = useRef<HTMLDivElement>(null);
     const modeMenuRef = useRef<HTMLDivElement>(null);
 
     useEffect(() => {
         messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
     }, [messages]);
+
+    // Load messages when session changes
+    useEffect(() => {
+        setCurrentSessionId(sessionId);
+        setUploadedFile(null);  // Reset uploaded file banner when switching chats
+        setUploadedDocIds([]);  // Reset doc list for new session
+        if (sessionId) {
+            getSessionMessages(sessionId)
+                .then((msgs) => {
+                    if (msgs.length > 0) {
+                        setMessages(
+                            msgs.map((m) => ({
+                                role: m.role as 'user' | 'assistant',
+                                content: m.content,
+                                timestamp: new Date(m.created_at),
+                                confidence: m.confidence ?? undefined,
+                                citations: m.citations ?? undefined,
+                                mode: (m.mode as PipelineMode) ?? undefined,
+                            }))
+                        );
+                    } else {
+                        // Empty session — show welcome
+                        setMessages([{
+                            role: 'assistant',
+                            content: "Hi! I'm StudyAI — your intelligent study companion. 📚\n\nUpload a PDF and ask me anything, or just chat!",
+                            timestamp: new Date(),
+                        }]);
+                    }
+                })
+                .catch(() => {
+                    // Couldn't load — show fresh chat
+                });
+        } else {
+            // No session selected — fresh chat
+            setMessages([{
+                role: 'assistant',
+                content: "Hi! I'm StudyAI — your intelligent study companion. 📚\n\nUpload a PDF and ask me anything, or just chat!\n\n**Modes available:**\n🤖 Auto · ⚡ Fast · 📚 Study · 🔬 Research · 💬 Chat",
+                timestamp: new Date(),
+            }]);
+        }
+    }, [sessionId]);
 
     // Close mode dropdown when clicking outside
     useEffect(() => {
@@ -141,13 +192,27 @@ export default function ChatPage() {
         setLoading(true);
 
         try {
-            const { askQuestion } = await import('../services/api');
+            // Auto-create a session if none exists
+            let sid = currentSessionId;
+            if (!sid) {
+                try {
+                    const title = currentInput.slice(0, 60) + (currentInput.length > 60 ? '…' : '');
+                    const session = await createSession(title);
+                    sid = session.id;
+                    setCurrentSessionId(sid);
+                    onSessionCreated(session);
+                } catch (err) {
+                    console.error('Could not create session', err);
+                }
+            }
 
             const response = await askQuestion({
                 query: currentInput,
                 conversation_history: messages.map(m => ({ role: m.role, content: m.content })),
                 mode: selectedMode,
-            } as any);
+                session_id: sid ?? undefined,
+                doc_ids: uploadedDocIds.length > 0 ? uploadedDocIds : undefined,
+            });
 
             const aiMessage: Message = {
                 role: 'assistant',
@@ -184,8 +249,24 @@ export default function ChatPage() {
         }]);
 
         try {
-            const { uploadDocument } = await import('../services/api');
-            const res = await uploadDocument(file);
+            // Auto-create session if none exists
+            let sid = currentSessionId;
+            if (!sid) {
+                try {
+                    const session = await createSession(file.name);
+                    sid = session.id;
+                    setCurrentSessionId(sid);
+                    onSessionCreated(session);
+                } catch (err) {
+                    console.error('Could not create session for upload', err);
+                }
+            }
+
+            const res = await uploadDocument(file, sid ?? undefined);
+            // Track this doc_id so all queries in this session search it
+            if (res.document_id) {
+                setUploadedDocIds(prev => [...prev, res.document_id]);
+            }
             setMessages(prev => [...prev.slice(0, -1), {
                 role: 'assistant',
                 content: `✅ **${file.name}** uploaded!\n\n📄 Pages: ${res.pages}\n📦 Chunks: ${res.chunks_created}\n⏱️ Time: ${(res.processing_time_ms / 1000).toFixed(1)}s\n\nAsk me anything — try **Study mode** for an exam plan! 🎓`,
@@ -262,7 +343,7 @@ export default function ChatPage() {
                                     </div>
                                 )}
 
-                                <p className="text-sm leading-relaxed whitespace-pre-wrap">{message.content}</p>
+                                <MarkdownRenderer content={message.content} />
 
                                 {message.confidence != null && (
                                     <div className="mt-3 pt-3 border-t border-gray-200 dark:border-dark-700 flex items-center justify-between text-xs text-gray-500 dark:text-gray-400">

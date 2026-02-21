@@ -62,8 +62,50 @@ CREATE TABLE IF NOT EXISTS feedback (
     created_at  TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 
-CREATE INDEX IF NOT EXISTS idx_documents_doc_id   ON documents(doc_id);
-CREATE INDEX IF NOT EXISTS idx_queries_created_at ON queries(created_at DESC);
+CREATE TABLE IF NOT EXISTS users (
+    id          SERIAL PRIMARY KEY,
+    email       VARCHAR(255) UNIQUE NOT NULL,
+    full_name   VARCHAR(255) NOT NULL,
+    hashed_pw   VARCHAR(255) NOT NULL,
+    provider    VARCHAR(50) DEFAULT 'local',
+    avatar_url  TEXT,
+    is_active   BOOLEAN DEFAULT TRUE,
+    created_at  TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    last_login  TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS chat_sessions (
+    id          SERIAL PRIMARY KEY,
+    user_id     INTEGER REFERENCES users(id) ON DELETE CASCADE,
+    title       VARCHAR(255),
+    created_at  TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at  TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS chat_messages (
+    id              SERIAL PRIMARY KEY,
+    session_id      INTEGER REFERENCES chat_sessions(id) ON DELETE CASCADE,
+    role            VARCHAR(20) NOT NULL,
+    content         TEXT NOT NULL,
+    mode            VARCHAR(20),
+    confidence      FLOAT,
+    citations       JSONB DEFAULT '[]',
+    created_at      TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+CREATE TABLE IF NOT EXISTS session_documents (
+    id          SERIAL PRIMARY KEY,
+    session_id  INTEGER REFERENCES chat_sessions(id) ON DELETE CASCADE,
+    doc_id      VARCHAR(50) NOT NULL,
+    added_at    TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE(session_id, doc_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_documents_doc_id      ON documents(doc_id);
+CREATE INDEX IF NOT EXISTS idx_queries_created_at    ON queries(created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_users_email           ON users(email);
+CREATE INDEX IF NOT EXISTS idx_chat_sessions_user    ON chat_sessions(user_id, updated_at DESC);
+CREATE INDEX IF NOT EXISTS idx_chat_messages_session ON chat_messages(session_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_session_docs          ON session_documents(session_id);
 """
 
 # Migration SQL — run once to add v4 columns to existing tables
@@ -358,3 +400,256 @@ async def get_analytics() -> Dict[str, Any]:
     except Exception as e:
         print(f"[DB] Error getting analytics: {e}")
         return {}
+
+
+# ─── User Operations ──────────────────────────────────────────────────────────
+
+async def create_user(
+    email: str, full_name: str, hashed_pw: str, provider: str = "local"
+) -> Optional[Dict]:
+    """Create a new user. Returns user dict or None if email taken."""
+    if not db_pool:
+        return None
+    try:
+        async with db_pool.acquire() as conn:
+            row = await conn.fetchrow(
+                """
+                INSERT INTO users (email, full_name, hashed_pw, provider)
+                VALUES ($1, $2, $3, $4)
+                RETURNING id, email, full_name, provider, avatar_url, is_active, created_at
+                """,
+                email, full_name, hashed_pw, provider,
+            )
+            return dict(row) if row else None
+    except asyncpg.UniqueViolationError:
+        return None
+    except Exception as e:
+        print(f"[DB] Error creating user: {e}")
+        return None
+
+
+async def get_user_by_email(email: str) -> Optional[Dict]:
+    """Get user by email (includes hashed_pw for verification)."""
+    if not db_pool:
+        return None
+    try:
+        async with db_pool.acquire() as conn:
+            row = await conn.fetchrow(
+                "SELECT * FROM users WHERE email = $1 AND is_active = TRUE", email
+            )
+            return dict(row) if row else None
+    except Exception as e:
+        print(f"[DB] Error getting user: {e}")
+        return None
+
+
+async def get_user_by_id(user_id: int) -> Optional[Dict]:
+    """Get user by ID."""
+    if not db_pool:
+        return None
+    try:
+        async with db_pool.acquire() as conn:
+            row = await conn.fetchrow(
+                "SELECT id, email, full_name, provider, avatar_url, is_active, created_at FROM users WHERE id = $1",
+                user_id,
+            )
+            return dict(row) if row else None
+    except Exception as e:
+        print(f"[DB] Error getting user by id: {e}")
+        return None
+
+
+async def update_last_login(user_id: int):
+    """Update last_login timestamp."""
+    if not db_pool:
+        return
+    try:
+        async with db_pool.acquire() as conn:
+            await conn.execute(
+                "UPDATE users SET last_login = CURRENT_TIMESTAMP WHERE id = $1", user_id
+            )
+    except Exception as e:
+        print(f"[DB] Error updating last_login: {e}")
+
+
+# ─── Chat Session Operations ──────────────────────────────────────────────────
+
+async def create_chat_session(user_id: int, title: str = "New Chat") -> Optional[Dict]:
+    """Create a new chat session for a user."""
+    if not db_pool:
+        return None
+    try:
+        async with db_pool.acquire() as conn:
+            row = await conn.fetchrow(
+                """
+                INSERT INTO chat_sessions (user_id, title)
+                VALUES ($1, $2)
+                RETURNING id, user_id, title, created_at, updated_at
+                """,
+                user_id, title,
+            )
+            return dict(row) if row else None
+    except Exception as e:
+        print(f"[DB] Error creating chat session: {e}")
+        return None
+
+
+async def get_user_sessions(user_id: int, limit: int = 50) -> List[Dict]:
+    """Get all chat sessions for a user, most recent first."""
+    if not db_pool:
+        return []
+    try:
+        async with db_pool.acquire() as conn:
+            rows = await conn.fetch(
+                """
+                SELECT s.id, s.title, s.created_at, s.updated_at,
+                       (SELECT COUNT(*) FROM chat_messages WHERE session_id = s.id) as message_count
+                FROM chat_sessions s
+                WHERE s.user_id = $1
+                ORDER BY s.updated_at DESC
+                LIMIT $2
+                """,
+                user_id, limit,
+            )
+            return [dict(row) for row in rows]
+    except Exception as e:
+        print(f"[DB] Error getting user sessions: {e}")
+        return []
+
+
+async def get_session_messages(session_id: int, user_id: int) -> List[Dict]:
+    """Get all messages for a session (verifies ownership via user_id)."""
+    if not db_pool:
+        return []
+    try:
+        async with db_pool.acquire() as conn:
+            # Verify session belongs to user
+            owner = await conn.fetchval(
+                "SELECT user_id FROM chat_sessions WHERE id = $1", session_id
+            )
+            if owner != user_id:
+                return []
+
+            rows = await conn.fetch(
+                """
+                SELECT id, role, content, mode, confidence, citations, created_at
+                FROM chat_messages
+                WHERE session_id = $1
+                ORDER BY created_at ASC
+                """,
+                session_id,
+            )
+            result = []
+            for row in rows:
+                d = dict(row)
+                # Parse citations JSONB
+                if isinstance(d.get("citations"), str):
+                    d["citations"] = json.loads(d["citations"])
+                result.append(d)
+            return result
+    except Exception as e:
+        print(f"[DB] Error getting session messages: {e}")
+        return []
+
+
+async def save_chat_message(
+    session_id: int,
+    role: str,
+    content: str,
+    mode: Optional[str] = None,
+    confidence: Optional[float] = None,
+    citations: Optional[List[Dict]] = None,
+) -> Optional[Dict]:
+    """Save a chat message and update session's updated_at."""
+    if not db_pool:
+        return None
+    try:
+        async with db_pool.acquire() as conn:
+            row = await conn.fetchrow(
+                """
+                INSERT INTO chat_messages (session_id, role, content, mode, confidence, citations)
+                VALUES ($1, $2, $3, $4, $5, $6)
+                RETURNING id, session_id, role, content, mode, confidence, citations, created_at
+                """,
+                session_id, role, content, mode, confidence,
+                json.dumps(citations) if citations else "[]",
+            )
+            # Update session timestamp
+            await conn.execute(
+                "UPDATE chat_sessions SET updated_at = CURRENT_TIMESTAMP WHERE id = $1",
+                session_id,
+            )
+            return dict(row) if row else None
+    except Exception as e:
+        print(f"[DB] Error saving chat message: {e}")
+        return None
+
+
+async def delete_chat_session(session_id: int, user_id: int) -> bool:
+    """Delete a chat session (verifies ownership)."""
+    if not db_pool:
+        return False
+    try:
+        async with db_pool.acquire() as conn:
+            result = await conn.execute(
+                "DELETE FROM chat_sessions WHERE id = $1 AND user_id = $2",
+                session_id, user_id,
+            )
+            return "DELETE 1" in result
+    except Exception as e:
+        print(f"[DB] Error deleting chat session: {e}")
+        return False
+
+
+async def update_session_title(session_id: int, user_id: int, title: str) -> bool:
+    """Update session title (verifies ownership)."""
+    if not db_pool:
+        return False
+    try:
+        async with db_pool.acquire() as conn:
+            result = await conn.execute(
+                "UPDATE chat_sessions SET title = $1 WHERE id = $2 AND user_id = $3",
+                title, session_id, user_id,
+            )
+            return "UPDATE 1" in result
+    except Exception as e:
+        print(f"[DB] Error updating session title: {e}")
+        return False
+
+
+# ─── Session-Document Linking ─────────────────────────────────────────────────
+
+async def link_doc_to_session(session_id: int, doc_id: str) -> bool:
+    """Link a document to a chat session."""
+    if not db_pool:
+        return False
+    try:
+        async with db_pool.acquire() as conn:
+            await conn.execute(
+                """
+                INSERT INTO session_documents (session_id, doc_id)
+                VALUES ($1, $2)
+                ON CONFLICT (session_id, doc_id) DO NOTHING
+                """,
+                session_id, doc_id,
+            )
+        return True
+    except Exception as e:
+        print(f"[DB] Error linking doc to session: {e}")
+        return False
+
+
+async def get_session_doc_ids(session_id: int) -> List[str]:
+    """Get all doc_ids linked to a chat session."""
+    if not db_pool:
+        return []
+    try:
+        async with db_pool.acquire() as conn:
+            rows = await conn.fetch(
+                "SELECT doc_id FROM session_documents WHERE session_id = $1",
+                session_id,
+            )
+            return [row["doc_id"] for row in rows]
+    except Exception as e:
+        print(f"[DB] Error getting session docs: {e}")
+        return []
