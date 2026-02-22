@@ -22,7 +22,7 @@ from typing import List, Optional, Dict, Any, Tuple
 import numpy as np
 import uvicorn
 from dotenv import load_dotenv
-from fastapi import FastAPI, UploadFile, File, Request, HTTPException
+from fastapi import FastAPI, UploadFile, File, Form, Query, Request, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 import google.generativeai as genai
@@ -44,16 +44,20 @@ from deep_translator import GoogleTranslator
 # NeonDB persistence layer
 import db_postgres as db
 
+# Auth + Chat History routes
+from routes_auth import router as auth_router
+from routes_chat_history import router as chat_history_router
+from auth import get_optional_user
+from llm_provider import llm_generate, get_provider_info
+
 # ─── Environment ───────────────────────────────────────────────────────────────
 load_dotenv()
 
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 GEMINI_MODEL   = os.getenv("GEMINI_MODEL", "gemini-2.0-flash-exp")
 
-if not GEMINI_API_KEY:
-    raise ValueError("GEMINI_API_KEY not found in environment!")
-
-genai.configure(api_key=GEMINI_API_KEY)
+if GEMINI_API_KEY:
+    genai.configure(api_key=GEMINI_API_KEY)
 
 # ─── Embedding Service (singleton) ────────────────────────────────────────────
 
@@ -99,6 +103,8 @@ class QueryRequest(BaseModel):
     conversation_history: Optional[List[Message]] = []
     options: Optional[dict] = {}
     mode: str = "auto"  # "auto" | "fast" | "study" | "research" | "chat"
+    session_id: Optional[int] = None  # chat session for history persistence
+    doc_ids: Optional[List[str]] = None  # restrict retrieval to these docs only
 
 class Citation(BaseModel):
     text: str
@@ -138,6 +144,7 @@ documents_store: Dict[str, Dict] = {}   # doc_id → {filename, text, chunks, em
 faiss_indexes:   Dict[str, faiss.IndexFlatIP] = {}  # doc_id → FAISS index
 bm25_indexes:    Dict[str, BM25Okapi]          = {}  # doc_id → BM25 index
 chunk_lookup:    Dict[str, List[Dict]]         = {}  # doc_id → ordered chunk list (mirrors FAISS order)
+session_doc_map: Dict[int, set]               = {}  # session_id → set of doc_ids (in-memory)
 
 # ─── FastAPI App ───────────────────────────────────────────────────────────────
 
@@ -153,10 +160,15 @@ app = FastAPI(
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
-    allow_credentials=False,
+    allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# ─── Register Auth + Chat History Routers ──────────────────────────────────────
+
+app.include_router(auth_router)
+app.include_router(chat_history_router)
 
 # ─── Startup / Shutdown ────────────────────────────────────────────────────────
 
@@ -331,11 +343,12 @@ def _bm25_scores(query_tokens: List[str], doc_id: str) -> Dict[int, float]:
     return {i: float(s) / max_score for i, s in enumerate(raw)}
 
 
-def hybrid_retrieve(query: str, top_k: int = 10) -> List[Dict]:
+def hybrid_retrieve(query: str, top_k: int = 10, doc_ids: Optional[List[str]] = None) -> List[Dict]:
     """
     Dual retrieval:
       final_score = 0.6 * semantic + 0.4 * bm25 (normalised)
     Returns merged chunk list sorted by final_score, with source info attached.
+    If doc_ids is given, only those documents are searched.
     """
     embed        = EmbeddingService.get()
     query_vec    = embed.encode_one(query)
@@ -343,7 +356,9 @@ def hybrid_retrieve(query: str, top_k: int = 10) -> List[Dict]:
 
     fused: Dict[str, Dict] = {}  # key = chunk["id"]
 
-    for doc_id, doc_data in documents_store.items():
+    docs_to_search = {did: documents_store[did] for did in (doc_ids or documents_store.keys()) if did in documents_store}
+
+    for doc_id, doc_data in docs_to_search.items():
         sem_scores = _semantic_scores(query_vec, doc_id, k=top_k * 2)
         lex_scores = _bm25_scores(query_tokens, doc_id)
         chunks     = chunk_lookup.get(doc_id, doc_data.get("chunks", []))
@@ -431,7 +446,7 @@ def mmr_select(
 # ─── Layer 6: Query Rewriting Agent ───────────────────────────────────────────
 
 async def query_rewrite_agent(query: str, query_type: str) -> str:
-    """Use Gemini to expand / clarify the user's query before retrieval."""
+    """Use LLM to expand / clarify the user's query before retrieval."""
     prompt = f"""You are a search query optimizer for an academic AI tutor.
 Rewrite the following student question into a more detailed, retrieval-friendly query.
 - Expand abbreviations
@@ -445,15 +460,14 @@ Original: {query}
 Rewritten query:"""
 
     try:
-        model    = genai.GenerativeModel(model_name=GEMINI_MODEL)
-        response = await model.generate_content_async(prompt)
-        rewritten = response.text.strip()
-        # Safety: if Gemini returns nothing useful, fall back
+        rewritten, _ = await llm_generate(prompt)
+        rewritten = rewritten.strip()
+        # Safety: if LLM returns nothing useful, fall back
         if len(rewritten) < 5 or len(rewritten) > 500:
             return query
         return rewritten
     except Exception as e:
-        print(f"[REWRITE] Gemini error: {e} — using original query")
+        print(f"[REWRITE] LLM error: {e} — using original query")
         return query
 
 # ─── Layer 7: Structured Context Assembly ─────────────────────────────────────
@@ -513,9 +527,8 @@ Task:
 Only use information from the provided context. Do not add outside knowledge."""
 
     try:
-        model    = genai.GenerativeModel(model_name=GEMINI_MODEL)
-        response = await model.generate_content_async(reflection_prompt)
-        reflection_text = response.text.strip()
+        reflection_text, _ = await llm_generate(reflection_prompt)
+        reflection_text = reflection_text.strip()
 
         if reflection_text.upper().startswith("VALIDATED"):
             return answer, True
@@ -529,7 +542,7 @@ Only use information from the provided context. Do not add outside knowledge."""
             return answer, False
 
     except Exception as e:
-        print(f"[REFLECT] Gemini error: {e} — skipping reflection")
+        print(f"[REFLECT] LLM error: {e} — skipping reflection")
         return answer, False
 
 # ─── Layer 6: Query Classification (Enhanced) ─────────────────────────────────
@@ -569,7 +582,20 @@ def classify_query(query: str) -> Dict[str, str]:
 # ─── Layer 10: Multilingual Support ───────────────────────────────────────────
 
 def detect_language(text: str) -> str:
-    """Detect query language; returns ISO 639-1 code or 'en'."""
+    """Detect query language; returns ISO 639-1 code or 'en'.
+    Short text defaults to English — langdetect is unreliable on < ~20 chars.
+    """
+    # Short text → assume English (langdetect is very unreliable on short input)
+    if len(text.strip()) < 20 or len(text.split()) < 4:
+        return "en"
+
+    # Common English phrases that langdetect misclassifies
+    _EN_MARKERS = ["my name", "i am", "what is", "how to", "tell me", "help me",
+                   "explain", "please", "thank", "hello", "hi ", "hey "]
+    lower = text.lower()
+    if any(m in lower for m in _EN_MARKERS):
+        return "en"
+
     try:
         lang = lang_detect(text)
         return lang if lang else "en"
@@ -649,16 +675,19 @@ def calculate_confidence_v4(
 
 # ─── Full-Document study retrieval ────────────────────────────────────────────
 
-def get_all_chunks_for_study() -> Tuple[List[Dict], str]:
+def get_all_chunks_for_study(doc_ids: Optional[List[str]] = None) -> Tuple[List[Dict], str]:
     """
-    For document_study queries: gather ALL chunks from ALL loaded documents,
+    For document_study queries: gather ALL chunks from requested documents,
     sorted by page number so Gemini sees them in reading order.
+    If doc_ids is given, only those documents are included.
     Returns (chunks_list, filenames_str).
     """
     all_chunks: List[Dict] = []
     filenames = set()
 
-    for doc_id, doc_data in documents_store.items():
+    docs_to_search = {did: documents_store[did] for did in (doc_ids or documents_store.keys()) if did in documents_store}
+
+    for doc_id, doc_data in docs_to_search.items():
         filenames.add(doc_data["filename"])
         chunks = chunk_lookup.get(doc_id, doc_data.get("chunks", []))
         for c in chunks:
@@ -733,18 +762,12 @@ Recommend the best order to read the document pages for exam preparation.
 
 Base your entire response on the document content above. Be specific with page numbers."""
 
-    model  = genai.GenerativeModel(model_name=GEMINI_MODEL)
     start  = time.time()
-    response = await model.generate_content_async(study_prompt)
+    answer_text, tokens = await llm_generate(study_prompt)
     gen_time = (time.time() - start) * 1000
 
-    try:
-        tokens = response.usage_metadata.total_token_count
-    except Exception:
-        tokens = 0
-
     return {
-        "answer":             response.text,
+        "answer":             answer_text,
         "generation_time_ms": gen_time,
         "tokens_used":        tokens,
     }
@@ -776,29 +799,20 @@ INSTRUCTIONS:
 - Always mention which source/page your answer draws from.
 - If the topic is not in the context, say so generically — do not hallucinate specific details not in the text."""
 
-    messages = []
+    # Flatten conversation + context into a single prompt for the LLM
+    conv_text = ""
     for msg in conversation_history[-6:]:
-        role = "user" if msg.role == "user" else "model"
-        messages.append({"role": role, "parts": [msg.content]})
+        role_label = "Student" if msg.role == "user" else "Tutor"
+        conv_text += f"{role_label}: {msg.content}\n"
 
-    if not messages:
-        messages.append({"role": "user", "parts": [f"{system_prompt}\n\nStudent question: {query}"]})
-    else:
-        messages[0]["parts"] = [f"{system_prompt}\n\n{messages[0]['parts'][0]}"]
-        messages.append({"role": "user", "parts": [query]})
+    full_prompt = f"{system_prompt}\n\n{conv_text}\nStudent question: {query}"
 
-    model  = genai.GenerativeModel(model_name=GEMINI_MODEL)
     start  = time.time()
-    response = await model.generate_content_async(messages)
+    answer_text, tokens = await llm_generate(full_prompt)
     gen_time = (time.time() - start) * 1000
 
-    try:
-        tokens = response.usage_metadata.total_token_count
-    except Exception:
-        tokens = 0
-
     return {
-        "answer":             response.text,
+        "answer":             answer_text,
         "generation_time_ms": gen_time,
         "tokens_used":        tokens,
     }
@@ -833,19 +847,18 @@ async def run_chat_pipeline(
         f"Auto: Smart routing / Chat: Casual talk.\n"
         f"Keep replies concise and encouraging.\n\nStudent: {query}"
     )
-    model = genai.GenerativeModel(model_name=GEMINI_MODEL)
-    t0    = time.time()
-    hist  = [{"role": "user" if m.role == "user" else "model", "parts": [m.content]}
-             for m in conversation_history[-4:]]
-    hist.append({"role": "user", "parts": [prompt]})
     try:
-        resp   = await model.generate_content_async(hist)
+        # Flatten conversation context into the prompt
+        conv_text = ""
+        for m in conversation_history[-4:]:
+            label = "Student" if m.role == "user" else "Tutor"
+            conv_text += f"{label}: {m.content}\n"
+
+        full_prompt = f"{prompt}\n{conv_text}"
+        t0 = time.time()
+        answer_text, tokens = await llm_generate(full_prompt)
         gen_ms = (time.time() - t0) * 1000
-        try:
-            tokens = resp.usage_metadata.total_token_count
-        except Exception:
-            tokens = 0
-        return {"answer": resp.text, "generation_time_ms": gen_ms, "tokens_used": tokens}
+        return {"answer": answer_text, "generation_time_ms": gen_ms, "tokens_used": tokens}
     except Exception:
         return {"answer": "Hey! I am StudyAI. Upload a PDF and ask me anything!", "generation_time_ms": 0, "tokens_used": 0}
 
@@ -855,13 +868,16 @@ async def run_chat_pipeline(
 async def run_fast_pipeline(
     query: str,
     conversation_history: List[Message],
+    doc_ids: Optional[List[str]] = None,
 ) -> Tuple[str, List[Citation], float, Dict]:
     """FAST MODE: FAISS-only top-3 -> direct Gemini. No BM25/rewrite/reflection."""
     embed     = EmbeddingService.get()
     query_vec = embed.encode_one(query)
 
+    docs_to_search = {did: documents_store[did] for did in (doc_ids or documents_store.keys()) if did in documents_store}
+
     fused: Dict[str, Dict] = {}
-    for doc_id, doc_data in documents_store.items():
+    for doc_id, doc_data in docs_to_search.items():
         sem    = _semantic_scores(query_vec, doc_id, k=6)
         chunks = chunk_lookup.get(doc_id, doc_data.get("chunks", []))
         for idx, chunk in enumerate(chunks):
@@ -882,14 +898,9 @@ async def run_fast_pipeline(
         f"You are a fast AI tutor. Answer concisely (under 120 words) using only this context:\n"
         f"{context}\n\nQuestion: {query}"
     )
-    model  = genai.GenerativeModel(model_name=GEMINI_MODEL)
     t0     = time.time()
-    resp   = await model.generate_content_async(prompt)
+    answer_text, tokens = await llm_generate(prompt)
     gen_ms = (time.time() - t0) * 1000
-    try:
-        tokens = resp.usage_metadata.total_token_count
-    except Exception:
-        tokens = 0
 
     citations = [
         Citation(
@@ -902,7 +913,7 @@ async def run_fast_pipeline(
     ]
     avg_score  = sum(c.get("score", 0) for c in top3) / max(len(top3), 1)
     confidence = round(min(0.50 + avg_score * 0.40, 0.88), 4)
-    return resp.text, citations, confidence, {"generation_time_ms": gen_ms, "tokens_used": tokens}
+    return answer_text, citations, confidence, {"generation_time_ms": gen_ms, "tokens_used": tokens}
 
 
 # --- Auto-detect mode ---------------------------------------------------------
@@ -921,9 +932,8 @@ async def auto_detect_mode(query: str) -> str:
         f"Message: \"{query}\"\nReply with ONLY the one word:"
     )
     try:
-        model    = genai.GenerativeModel(model_name=GEMINI_MODEL)
-        response = await model.generate_content_async(prompt)
-        detected = response.text.strip().lower().split()[0]
+        detected, _ = await llm_generate(prompt)
+        detected = detected.strip().lower().split()[0]
         return detected if detected in ("chat", "fast", "research", "study") else "fast"
     except Exception:
         return "fast"
@@ -996,8 +1006,8 @@ async def list_documents():
 
 
 @app.post("/api/v1/documents/upload")
-async def upload_document(file: UploadFile = File(...)):
-    print(f"\n[UPLOAD] Processing: {file.filename}")
+async def upload_document(file: UploadFile = File(...), session_id: Optional[int] = Query(None)):
+    print(f"\n[UPLOAD] Processing: {file.filename}  (session_id={session_id})")
 
     if not file.filename.lower().endswith(".pdf"):
         raise HTTPException(400, "Only PDF files supported")
@@ -1058,6 +1068,18 @@ async def upload_document(file: UploadFile = File(...)):
             "processing_time_ms": elapsed,
         }
 
+        # Link document to session if provided
+        if session_id:
+            # In-memory mapping (immediate; always works)
+            if session_id not in session_doc_map:
+                session_doc_map[session_id] = set()
+            session_doc_map[session_id].add(doc_id)
+            print(f"[UPLOAD]       → Linked to session {session_id} (in-memory: {session_doc_map[session_id]})")
+            # Also persist to DB (best-effort)
+            await db.link_doc_to_session(session_id, doc_id)
+
+        return result
+
     except Exception as e:
         print(f"[UPLOAD ERROR] {e}")
         import traceback; traceback.print_exc()
@@ -1078,13 +1100,63 @@ async def delete_document(doc_id: str):
     return {"status": "deleted", "doc_id": doc_id}
 
 
+async def _save_assistant_response(user_id, session_id, response: QueryResponse):
+    """Save assistant response to chat history if user is authenticated."""
+    if user_id and session_id:
+        try:
+            await db.save_chat_message(
+                session_id=session_id, role="assistant", content=response.answer,
+                mode=response.metadata.pipeline_mode if response.metadata else None,
+                confidence=response.confidence,
+                citations=[c.dict() for c in response.citations] if response.citations else [],
+            )
+        except Exception as e:
+            print(f"[CHAT HISTORY] Error saving assistant message: {e}")
+
+
 @app.post("/api/v1/query/ask", response_model=QueryResponse)
-async def ask_question(request: QueryRequest):
+async def ask_question(request: QueryRequest, raw_request: Request):
     total_start = time.time()
     print(f"\n{'═'*60}")
     print(f"[AGENTIC PIPELINE v4.0] START")
     print(f"Query: {request.query}")
     print(f"{'═'*60}")
+
+    # Optional auth — save chat history if user is logged in
+    current_user = await get_optional_user(raw_request)
+    session_id = request.session_id
+    user_id = current_user["user_id"] if current_user else None
+
+    # Save user message to chat history
+    if user_id and session_id:
+        await db.save_chat_message(
+            session_id=session_id, role="user", content=request.query,
+            mode=request.mode,
+        )
+
+    # Determine which documents to search
+    # Priority: 1) explicit doc_ids from frontend, 2) session-linked docs, 3) all docs
+    session_doc_ids: Optional[List[str]] = None
+    if request.doc_ids:
+        # Frontend explicitly specified which docs to search
+        session_doc_ids = request.doc_ids
+        print(f"[DOCS] Using {len(session_doc_ids)} doc_ids from request: {session_doc_ids}")
+    elif session_id:
+        # Try in-memory map, then DB
+        if session_id in session_doc_map and session_doc_map[session_id]:
+            session_doc_ids = list(session_doc_map[session_id])
+            print(f"[DOCS] Scoping to {len(session_doc_ids)} docs (in-memory): {session_doc_ids}")
+        else:
+            session_doc_ids = await db.get_session_doc_ids(session_id)
+            if session_doc_ids:
+                session_doc_map[session_id] = set(session_doc_ids)
+                print(f"[DOCS] Scoping to {len(session_doc_ids)} docs (DB): {session_doc_ids}")
+            else:
+                session_doc_ids = []
+                print(f"[DOCS] Session {session_id} has no linked docs")
+
+    # Determine if we have docs available for this request
+    has_docs = bool(session_doc_ids) if session_doc_ids is not None else bool(documents_store)
 
     try:
         # Language detection used by all modes
@@ -1096,6 +1168,10 @@ async def ask_question(request: QueryRequest):
         req_mode = (request.mode or "auto").lower().strip()
         if req_mode == "auto":
             resolved_mode = await auto_detect_mode(english_query)
+            # When auto-detected, upgrade "fast" to "research" for full context
+            if resolved_mode == "fast" and has_docs:
+                print("[AUTO] Upgrading fast → research for full context")
+                resolved_mode = "research"
         elif req_mode in ("chat", "fast", "study", "research"):
             resolved_mode = req_mode
         else:
@@ -1105,32 +1181,42 @@ async def ask_question(request: QueryRequest):
 
         # CHAT MODE ---------------------------------------------------
         if resolved_mode == "chat":
-            gen = await run_chat_pipeline(english_query, request.conversation_history)
-            answer = gen["answer"]
-            if lang_detected != "en":
-                answer = translate_from_english(answer, lang_detected)
-            total_time = (time.time() - total_start) * 1000
-            return QueryResponse(
-                answer=answer, citations=[], confidence=0.95,
-                metadata=QueryMetadata(
-                    query_type="chat", retrieval_strategy="none", pipeline_mode="chat",
-                    generation_time_ms=gen["generation_time_ms"],
-                    tokens_used=gen["tokens_used"], total_time_ms=total_time,
-                    language_detected=lang_detected, original_query=original_query,
-                    rewritten_query=english_query,
-                ),
-            )
+            # If user has uploaded docs, upgrade to Research pipeline
+            # so the chatbot can actually talk about the PDF content
+            if has_docs:
+                print("[CHAT+DOCS] Documents available — upgrading to research pipeline for full context")
+                resolved_mode = "research"
+                # Fall through to Research pipeline below
+            else:
+                # Pure chat — no documents uploaded
+                gen = await run_chat_pipeline(english_query, request.conversation_history)
+                answer = gen["answer"]
+                if lang_detected != "en":
+                    answer = translate_from_english(answer, lang_detected)
+                total_time = (time.time() - total_start) * 1000
+                resp = QueryResponse(
+                    answer=answer, citations=[], confidence=0.95,
+                    metadata=QueryMetadata(
+                        query_type="chat", retrieval_strategy="none", pipeline_mode="chat",
+                        generation_time_ms=gen["generation_time_ms"],
+                        tokens_used=gen["tokens_used"], total_time_ms=total_time,
+                        language_detected=lang_detected, original_query=original_query,
+                        rewritten_query=english_query,
+                    ),
+                )
+                await _save_assistant_response(user_id, session_id, resp)
+                return resp
 
         # FAST MODE ---------------------------------------------------
         if resolved_mode == "fast":
-            if not documents_store:
+            if not has_docs:
                 return QueryResponse(
                     answer="Upload a PDF first to use Fast mode!",
                     citations=[], confidence=0.0,
                     metadata=QueryMetadata(pipeline_mode="fast", total_time_ms=0),
                 )
             answer_text, citations, confidence, timing = await run_fast_pipeline(
-                english_query, request.conversation_history
+                english_query, request.conversation_history, doc_ids=session_doc_ids
             )
             if lang_detected != "en":
                 answer_text = translate_from_english(answer_text, lang_detected)
@@ -1144,7 +1230,7 @@ async def ask_question(request: QueryRequest):
                 mmr_diversity_score=0.0, avg_retrieval_score=confidence, reflection_validated=False,
                 language_detected=lang_detected, original_query=original_query, rewritten_query=english_query,
             )
-            return QueryResponse(
+            resp = QueryResponse(
                 answer=answer_text, citations=citations, confidence=confidence,
                 metadata=QueryMetadata(
                     query_type="fast", retrieval_strategy="semantic_only", pipeline_mode="fast",
@@ -1155,17 +1241,19 @@ async def ask_question(request: QueryRequest):
                     original_query=original_query, rewritten_query=english_query,
                 ),
             )
+            await _save_assistant_response(user_id, session_id, resp)
+            return resp
 
         # STUDY MODE --------------------------------------------------
         if resolved_mode == "study":
-            if not documents_store:
+            if not has_docs:
                 return QueryResponse(
                     answer="Upload a PDF first to use Study mode!",
                     citations=[], confidence=0.0,
                     metadata=QueryMetadata(pipeline_mode="study", total_time_ms=0),
                 )
             ret_start = time.time()
-            all_chunks, filenames = get_all_chunks_for_study()
+            all_chunks, filenames = get_all_chunks_for_study(doc_ids=session_doc_ids)
             ret_ms    = (time.time() - ret_start) * 1000
             gen       = await generate_study_guide_with_gemini(english_query, all_chunks, filenames)
             answer    = gen["answer"]
@@ -1192,7 +1280,7 @@ async def ask_question(request: QueryRequest):
                 mmr_diversity_score=1.0, avg_retrieval_score=1.0, reflection_validated=True,
                 language_detected=lang_detected, original_query=original_query, rewritten_query=english_query,
             )
-            return QueryResponse(
+            resp = QueryResponse(
                 answer=answer, citations=cit_list[:20], confidence=0.92,
                 metadata=QueryMetadata(
                     query_type="document_study", retrieval_strategy="full_document_synthesis",
@@ -1203,9 +1291,11 @@ async def ask_question(request: QueryRequest):
                     language_detected=lang_detected, original_query=original_query, rewritten_query=english_query,
                 ),
             )
+            await _save_assistant_response(user_id, session_id, resp)
+            return resp
 
         # RESEARCH MODE (v4 full pipeline) -- default fallback ---------
-        if not documents_store:
+        if not has_docs:
             return QueryResponse(
                 answer="Please upload a PDF first to enable the research pipeline.",
                 citations=[], confidence=0.0,
@@ -1232,7 +1322,7 @@ async def ask_question(request: QueryRequest):
         if query_type == "document_study":
             print("[STUDY MODE] Full-document synthesis activated…")
             retrieval_start = time.time()
-            all_study_chunks, filenames = get_all_chunks_for_study()
+            all_study_chunks, filenames = get_all_chunks_for_study(doc_ids=session_doc_ids)
             retrieval_time = (time.time() - retrieval_start) * 1000
             print(f"[STUDY MODE] {len(all_study_chunks)} chunks from: {filenames}")
 
@@ -1294,6 +1384,7 @@ async def ask_question(request: QueryRequest):
                 citations=citations[:20],
                 confidence=confidence,
                 metadata=QueryMetadata(
+                    pipeline_mode=resolved_mode,
                     query_type="document_study",
                     retrieval_strategy="full_document_synthesis",
                     chunks_retrieved=len(all_study_chunks),
@@ -1318,7 +1409,7 @@ async def ask_question(request: QueryRequest):
         # ── STEP 3: Hybrid Retrieval
         print("[3/8] HYBRID RETRIEVAL (FAISS + BM25)…")
         retrieval_start = time.time()
-        candidates = hybrid_retrieve(rewritten_query, top_k=12)
+        candidates = hybrid_retrieve(rewritten_query, top_k=12, doc_ids=session_doc_ids)
         retrieval_time = (time.time() - retrieval_start) * 1000
         print(f"       → Candidates: {len(candidates)}, Time: {retrieval_time:.0f}ms")
 
@@ -1426,11 +1517,12 @@ async def ask_question(request: QueryRequest):
             rewritten_query=rewritten_query,
         )
 
-        return QueryResponse(
+        resp = QueryResponse(
             answer=final_answer,
             citations=citations,
             confidence=confidence,
             metadata=QueryMetadata(
+                pipeline_mode=resolved_mode,
                 query_type=query_type,
                 retrieval_strategy="hybrid_semantic_mmr",
                 chunks_retrieved=len(candidates),
@@ -1447,6 +1539,8 @@ async def ask_question(request: QueryRequest):
                 rewritten_query=rewritten_query,
             ),
         )
+        await _save_assistant_response(user_id, session_id, resp)
+        return resp
 
     except Exception as e:
         print(f"[PIPELINE ERROR] {e}")
@@ -1503,11 +1597,12 @@ if __name__ == "__main__":
     print("  3. Hybrid Retrieval                  (FAISS cosine + BM25 Okapi)")
     print("  4. MMR Diversification               (λ=0.70)")
     print("  5. Structured Context Assembly       (Page + Section aware)")
-    print("  6. Answer Generation                 (Gemini)")
-    print("  7. Reflection / Validation Agent     (Gemini)")
+    print("  6. Answer Generation                 (LLM)")
+    print("  7. Reflection / Validation Agent     (LLM)")
     print("  8. Advanced Confidence Scoring       (6-factor)")
     print("=" * 70)
-    print(f"Gemini Model : {GEMINI_MODEL}")
+    llm_info = get_provider_info()
+    print(f"LLM Provider : {llm_info['provider'].upper()} ({llm_info['model']})")
     print(f"Embed Model  : {EmbeddingService.MODEL_NAME}")
     print(f"Server       : http://localhost:8000")
     print(f"API Docs     : http://localhost:8000/docs")

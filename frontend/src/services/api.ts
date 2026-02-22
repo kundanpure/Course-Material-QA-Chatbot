@@ -10,14 +10,17 @@ const apiClient = axios.create({
     headers: {
         'Content-Type': 'application/json',
     },
-    withCredentials: false, // Disabled for CORS compatibility
+    withCredentials: false,
 });
 
 // Request interceptor - Add auth tokens, request ID, etc.
 apiClient.interceptors.request.use(
     (config) => {
-        config.headers['X-Tenant-ID'] = 'demo-tenant';
-        config.headers['X-User-ID'] = 'demo-user';
+        // Add JWT token if available
+        const token = localStorage.getItem('auth_token');
+        if (token) {
+            config.headers['Authorization'] = `Bearer ${token}`;
+        }
         config.headers['X-Request-ID'] = `req-${Date.now()}-${Math.random().toString(36).substring(7)}`;
         return config;
     },
@@ -36,6 +39,7 @@ apiClient.interceptors.response.use(
             console.error('API Error:', error.response.status, error.response.data);
             if (error.response.status === 401) {
                 console.error('Unauthorized - Please login');
+                // Don't auto-redirect here; let the AuthContext handle it
             }
         } else if (error.request) {
             console.error('Network Error: No response from server');
@@ -49,7 +53,7 @@ apiClient.interceptors.response.use(
 export default apiClient;
 
 // ============================================
-// API Service Functions
+// Type Definitions
 // ============================================
 
 export interface Message {
@@ -64,6 +68,8 @@ export interface QueryRequest {
     conversation_history?: Message[];
     options?: Record<string, any>;
     mode?: PipelineMode;
+    session_id?: number;
+    doc_ids?: string[];
 }
 
 export interface Citation {
@@ -95,6 +101,70 @@ export interface QueryResponse {
     cache_hit_similarity?: number;
 }
 
+// ============================================
+// Auth API
+// ============================================
+
+export const loginUser = async (email: string, password: string) => {
+    const res = await apiClient.post('/api/v1/auth/login', { email, password });
+    return res.data;
+};
+
+export const registerUser = async (email: string, password: string, full_name: string) => {
+    const res = await apiClient.post('/api/v1/auth/register', { email, password, full_name });
+    return res.data;
+};
+
+export const getCurrentUser = async () => {
+    const res = await apiClient.get('/api/v1/auth/me');
+    return res.data;
+};
+
+// ============================================
+// Chat History API
+// ============================================
+
+export interface ChatSession {
+    id: number;
+    title: string;
+    created_at: string;
+    updated_at: string;
+    message_count: number;
+}
+
+export interface ChatMessage {
+    id: number;
+    role: 'user' | 'assistant';
+    content: string;
+    mode?: string;
+    confidence?: number;
+    citations?: any[];
+    created_at: string;
+}
+
+export const getSessions = async (): Promise<ChatSession[]> => {
+    const res = await apiClient.get('/api/v1/chat/sessions');
+    return res.data.sessions;
+};
+
+export const createSession = async (title?: string): Promise<ChatSession> => {
+    const res = await apiClient.post('/api/v1/chat/sessions', { title: title || 'New Chat' });
+    return res.data;
+};
+
+export const getSessionMessages = async (sessionId: number): Promise<ChatMessage[]> => {
+    const res = await apiClient.get(`/api/v1/chat/sessions/${sessionId}/messages`);
+    return res.data.messages;
+};
+
+export const deleteSession = async (sessionId: number): Promise<void> => {
+    await apiClient.delete(`/api/v1/chat/sessions/${sessionId}`);
+};
+
+// ============================================
+// Core API Functions
+// ============================================
+
 /**
  * Ask a question to the AI assistant
  */
@@ -106,14 +176,17 @@ export const askQuestion = async (request: QueryRequest): Promise<QueryResponse>
 /**
  * Upload a PDF document
  */
-export const uploadDocument = async (file: File, tenantId?: string): Promise<any> => {
+export const uploadDocument = async (file: File, sessionId?: number, tenantId?: string): Promise<any> => {
     const formData = new FormData();
     formData.append('file', file);
     if (tenantId) {
         formData.append('tenant_id', tenantId);
     }
 
-    const response = await apiClient.post('/api/v1/documents/upload', formData, {
+    // Send session_id as URL query param (Form param is unreliable with multipart)
+    const params = sessionId ? `?session_id=${sessionId}` : '';
+
+    const response = await apiClient.post(`/api/v1/documents/upload${params}`, formData, {
         headers: {
             'Content-Type': 'multipart/form-data',
         },
