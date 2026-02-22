@@ -1,5 +1,6 @@
 import { createContext, useContext, useState, useEffect, useCallback, type ReactNode } from 'react';
 import apiClient from '../services/api';
+import { verifyEmail as verifyEmailApi, googleLogin as googleLoginApi } from '../services/api';
 
 // ─── Types ─────────────────────────────────────────────────────────────────────
 
@@ -18,7 +19,9 @@ interface AuthContextType {
     isAuthenticated: boolean;
     isLoading: boolean;
     login: (email: string, password: string) => Promise<void>;
-    register: (email: string, password: string, fullName: string) => Promise<void>;
+    register: (email: string, password: string, fullName: string) => Promise<{ requiresVerification: boolean; email: string }>;
+    verifyEmail: (email: string, code: string) => Promise<void>;
+    googleLogin: (credential: string) => Promise<void>;
     logout: () => void;
 }
 
@@ -85,7 +88,25 @@ export function AuthProvider({ children }: { children: ReactNode }) {
             password,
             full_name: fullName,
         });
-        const { token: newToken, user: userData } = res.data;
+        // Registration now returns { requires_verification, email, message }
+        // Do NOT auto-login — user must verify email first
+        return {
+            requiresVerification: res.data.requires_verification || false,
+            email: res.data.email || email,
+        };
+    }, []);
+
+    const verifyEmail = useCallback(async (email: string, code: string) => {
+        const res = await verifyEmailApi(email, code);
+        const { token: newToken, user: userData } = res;
+        localStorage.setItem('auth_token', newToken);
+        setToken(newToken);
+        setUser(userData);
+    }, []);
+
+    const handleGoogleLogin = useCallback(async (credential: string) => {
+        const res = await googleLoginApi(credential);
+        const { token: newToken, user: userData } = res;
         localStorage.setItem('auth_token', newToken);
         setToken(newToken);
         setUser(userData);
@@ -106,6 +127,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
                 isLoading,
                 login,
                 register,
+                verifyEmail,
+                googleLogin: handleGoogleLogin,
                 logout,
             }}
         >
