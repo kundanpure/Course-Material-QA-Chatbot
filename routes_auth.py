@@ -8,7 +8,7 @@ from typing import Optional
 
 import db_postgres as db
 from auth import hash_password, verify_password, create_jwt, get_current_user, verify_google_token
-from email_service import generate_otp, send_verification_email
+from email_service import generate_otp, send_verification_email, send_password_reset_email
 
 router = APIRouter(prefix="/api/v1/auth", tags=["Auth"])
 
@@ -42,6 +42,16 @@ class GoogleLoginRequest(BaseModel):
 class AuthResponse(BaseModel):
     token: str
     user: dict
+
+
+class ForgotPasswordRequest(BaseModel):
+    email: str
+
+
+class ResetPasswordRequest(BaseModel):
+    email: str
+    code: str
+    new_password: str
 
 
 # ─── Endpoints ─────────────────────────────────────────────────────────────────
@@ -87,7 +97,7 @@ async def register(req: RegisterRequest):
 
     # Generate OTP and send email
     otp = generate_otp()
-    expires = datetime.now(timezone.utc) + timedelta(minutes=10)
+    expires = datetime.utcnow() + timedelta(minutes=10)
     await db.set_verification_code(email, otp, expires)
     email_sent = await send_verification_email(email, otp, req.full_name.strip())
 
@@ -170,7 +180,7 @@ async def login(req: LoginRequest):
     if not user.get("is_verified", False):
         # Resend OTP automatically
         otp = generate_otp()
-        expires = datetime.now(timezone.utc) + timedelta(minutes=10)
+        expires = datetime.utcnow() + timedelta(minutes=10)
         await db.set_verification_code(user["email"], otp, expires)
         await send_verification_email(user["email"], otp, user.get("full_name", ""))
         raise HTTPException(403, "Email not verified. A new verification code has been sent.")
@@ -223,6 +233,60 @@ async def google_login(req: GoogleLoginRequest):
             "created_at": str(user["created_at"]),
         },
     }
+
+
+@router.post("/forgot-password")
+async def forgot_password(req: ForgotPasswordRequest):
+    """Send a password reset OTP to the user's email."""
+    email = req.email.lower().strip()
+    user = await db.get_user_by_email(email)
+
+    if not user:
+        # Don't reveal whether the email exists
+        return {"message": "If an account exists with this email, a reset code has been sent."}
+
+    if user.get("provider") == "google" and not user.get("hashed_pw"):
+        return {"message": "This account uses Google Sign-In. No password to reset."}
+
+    otp = generate_otp()
+    expires = datetime.utcnow() + timedelta(minutes=10)
+    await db.set_verification_code(email, otp, expires)
+    await send_password_reset_email(email, otp, user.get("full_name", ""))
+
+    return {"message": "If an account exists with this email, a reset code has been sent.", "email": email}
+
+
+@router.post("/reset-password")
+async def reset_password(req: ResetPasswordRequest):
+    """Reset password using OTP code."""
+    email = req.email.lower().strip()
+    code = req.code.strip()
+
+    if len(req.new_password) < 6:
+        raise HTTPException(400, "Password must be at least 6 characters")
+    if not code or len(code) != 6:
+        raise HTTPException(400, "Invalid reset code")
+
+    # Verify the OTP
+    verified = await db.verify_user_email(email, code)
+    if not verified:
+        raise HTTPException(400, "Invalid or expired reset code")
+
+    # Update the password
+    user = await db.get_user_by_email(email)
+    if not user:
+        raise HTTPException(404, "User not found")
+
+    hashed = hash_password(req.new_password)
+    # Update password in DB
+    if db.db_pool:
+        async with db.db_pool.acquire() as conn:
+            await conn.execute(
+                "UPDATE users SET hashed_pw = $1, is_verified = TRUE WHERE email = $2",
+                hashed, email,
+            )
+
+    return {"message": "Password reset successful. You can now login with your new password."}
 
 
 @router.get("/me")

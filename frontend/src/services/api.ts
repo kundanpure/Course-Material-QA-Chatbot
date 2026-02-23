@@ -135,6 +135,16 @@ export const googleLogin = async (credential: string) => {
     return res.data;
 };
 
+export const forgotPassword = async (email: string) => {
+    const res = await apiClient.post('/api/v1/auth/forgot-password', { email });
+    return res.data;
+};
+
+export const resetPassword = async (email: string, code: string, new_password: string) => {
+    const res = await apiClient.post('/api/v1/auth/reset-password', { email, code, new_password });
+    return res.data;
+};
+
 // ============================================
 // Chat History API
 // ============================================
