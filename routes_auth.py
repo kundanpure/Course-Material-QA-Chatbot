@@ -1,12 +1,14 @@
 """
-Auth Routes — Register, Login, Profile
+Auth Routes — Register (with OTP), Login, Verify Email, Google OAuth, Profile
 """
-from fastapi import APIRouter, HTTPException, Depends, Request
-from pydantic import BaseModel, EmailStr
+from datetime import datetime, timedelta
+from fastapi import APIRouter, HTTPException, Request
+from pydantic import BaseModel
 from typing import Optional
 
 import db_postgres as db
-from auth import hash_password, verify_password, create_jwt, get_current_user
+from auth import hash_password, verify_password, create_jwt, get_current_user, verify_google_token
+from email_service import generate_otp, send_verification_email
 
 router = APIRouter(prefix="/api/v1/auth", tags=["Auth"])
 
@@ -24,25 +26,29 @@ class LoginRequest(BaseModel):
     password: str
 
 
+class VerifyEmailRequest(BaseModel):
+    email: str
+    code: str
+
+
+class ResendCodeRequest(BaseModel):
+    email: str
+
+
+class GoogleLoginRequest(BaseModel):
+    credential: str  # Google ID token from frontend
+
+
 class AuthResponse(BaseModel):
     token: str
     user: dict
 
 
-class UserProfile(BaseModel):
-    id: int
-    email: str
-    full_name: str
-    provider: str
-    avatar_url: Optional[str] = None
-    created_at: str
-
-
 # ─── Endpoints ─────────────────────────────────────────────────────────────────
 
-@router.post("/register", response_model=AuthResponse)
+@router.post("/register")
 async def register(req: RegisterRequest):
-    """Create a new user account."""
+    """Create a new user account and send verification OTP."""
     # Validate
     if len(req.password) < 6:
         raise HTTPException(400, "Password must be at least 6 characters")
@@ -51,20 +57,123 @@ async def register(req: RegisterRequest):
     if not req.full_name.strip():
         raise HTTPException(400, "Full name is required")
 
+    email = req.email.lower().strip()
+
     # Check if email already exists
-    existing = await db.get_user_by_email(req.email.lower().strip())
+    existing = await db.get_user_by_email(email)
     if existing:
+        # If user exists but not verified, resend code
+        if not existing.get("is_verified", False):
+            otp = generate_otp()
+            expires = datetime.utcnow() + timedelta(minutes=10)
+            await db.set_verification_code(email, otp, expires)
+            await send_verification_email(email, otp, existing.get("full_name", ""))
+            return {
+                "requires_verification": True,
+                "email": email,
+                "message": "Verification code resent to your email",
+            }
         raise HTTPException(409, "Email already registered")
 
     # Create user
     hashed = hash_password(req.password)
     user = await db.create_user(
-        email=req.email.lower().strip(),
+        email=email,
         full_name=req.full_name.strip(),
         hashed_pw=hashed,
     )
     if not user:
         raise HTTPException(500, "Failed to create user")
+
+    # Generate OTP and send email
+    otp = generate_otp()
+    expires = datetime.now(timezone.utc) + timedelta(minutes=10)
+    await db.set_verification_code(email, otp, expires)
+    email_sent = await send_verification_email(email, otp, req.full_name.strip())
+
+    return {
+        "requires_verification": True,
+        "email": email,
+        "message": "Verification code sent to your email" if email_sent else "Account created — check your email for verification code",
+    }
+
+
+@router.post("/verify-email")
+async def verify_email(req: VerifyEmailRequest):
+    """Verify email with OTP code and return JWT token."""
+    email = req.email.lower().strip()
+    code = req.code.strip()
+
+    if not code or len(code) != 6:
+        raise HTTPException(400, "Invalid verification code")
+
+    verified = await db.verify_user_email(email, code)
+    if not verified:
+        raise HTTPException(400, "Invalid or expired verification code")
+
+    # Get user and generate token
+    user = await db.get_user_by_email(email)
+    if not user:
+        raise HTTPException(404, "User not found")
+
+    token = create_jwt(user["id"], user["email"])
+    await db.update_last_login(user["id"])
+
+    return {
+        "token": token,
+        "user": {
+            "id": user["id"],
+            "email": user["email"],
+            "full_name": user["full_name"],
+            "provider": user["provider"],
+            "avatar_url": user.get("avatar_url"),
+            "created_at": str(user["created_at"]),
+        },
+    }
+
+
+@router.post("/resend-code")
+async def resend_code(req: ResendCodeRequest):
+    """Resend verification OTP to email."""
+    email = req.email.lower().strip()
+    user = await db.get_user_by_email(email)
+
+    if not user:
+        raise HTTPException(404, "No account found with this email")
+
+    if user.get("is_verified", False):
+        raise HTTPException(400, "Email already verified")
+
+    otp = generate_otp()
+    expires = datetime.utcnow() + timedelta(minutes=10)
+    await db.set_verification_code(email, otp, expires)
+    await send_verification_email(email, otp, user.get("full_name", ""))
+
+    return {"message": "Verification code resent", "email": email}
+
+
+@router.post("/login", response_model=AuthResponse)
+async def login(req: LoginRequest):
+    """Login with email and password."""
+    user = await db.get_user_by_email(req.email.lower().strip())
+    if not user:
+        raise HTTPException(401, "Invalid email or password")
+
+    # Check if user registered via Google (no password)
+    if user.get("provider") == "google" and not user.get("hashed_pw"):
+        raise HTTPException(400, "This account uses Google Sign-In. Please login with Google.")
+
+    if not verify_password(req.password, user["hashed_pw"]):
+        raise HTTPException(401, "Invalid email or password")
+
+    # Check email verification
+    if not user.get("is_verified", False):
+        # Resend OTP automatically
+        otp = generate_otp()
+        expires = datetime.now(timezone.utc) + timedelta(minutes=10)
+        await db.set_verification_code(user["email"], otp, expires)
+        await send_verification_email(user["email"], otp, user.get("full_name", ""))
+        raise HTTPException(403, "Email not verified. A new verification code has been sent.")
 
     # Generate token
     token = create_jwt(user["id"], user["email"])
@@ -83,17 +192,23 @@ async def register(req: RegisterRequest):
     }
 
 
-@router.post("/login", response_model=AuthResponse)
-async def login(req: LoginRequest):
-    """Login with email and password."""
-    user = await db.get_user_by_email(req.email.lower().strip())
+@router.post("/google")
+async def google_login(req: GoogleLoginRequest):
+    """Authenticate with Google. Creates account if first time."""
+    google_user = await verify_google_token(req.credential)
+    if not google_user:
+        raise HTTPException(401, "Invalid Google token")
+
+    # Get or create user
+    user = await db.get_or_create_google_user(
+        google_id=google_user["sub"],
+        email=google_user["email"],
+        full_name=google_user["name"],
+        avatar_url=google_user.get("picture"),
+    )
     if not user:
-        raise HTTPException(401, "Invalid email or password")
+        raise HTTPException(500, "Failed to process Google login")
 
-    if not verify_password(req.password, user["hashed_pw"]):
-        raise HTTPException(401, "Invalid email or password")
-
-    # Generate token
     token = create_jwt(user["id"], user["email"])
     await db.update_last_login(user["id"])
 
@@ -103,7 +218,7 @@ async def login(req: LoginRequest):
             "id": user["id"],
             "email": user["email"],
             "full_name": user["full_name"],
-            "provider": user["provider"],
+            "provider": user.get("provider", "google"),
             "avatar_url": user.get("avatar_url"),
             "created_at": str(user["created_at"]),
         },

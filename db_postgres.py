@@ -63,15 +63,19 @@ CREATE TABLE IF NOT EXISTS feedback (
 );
 
 CREATE TABLE IF NOT EXISTS users (
-    id          SERIAL PRIMARY KEY,
-    email       VARCHAR(255) UNIQUE NOT NULL,
-    full_name   VARCHAR(255) NOT NULL,
-    hashed_pw   VARCHAR(255) NOT NULL,
-    provider    VARCHAR(50) DEFAULT 'local',
-    avatar_url  TEXT,
-    is_active   BOOLEAN DEFAULT TRUE,
-    created_at  TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    last_login  TIMESTAMP
+    id                    SERIAL PRIMARY KEY,
+    email                 VARCHAR(255) UNIQUE NOT NULL,
+    full_name             VARCHAR(255) NOT NULL,
+    hashed_pw             VARCHAR(255) NOT NULL DEFAULT '',
+    provider              VARCHAR(50) DEFAULT 'local',
+    avatar_url            TEXT,
+    is_active             BOOLEAN DEFAULT TRUE,
+    is_verified           BOOLEAN DEFAULT FALSE,
+    verification_code     VARCHAR(6),
+    verification_expires  TIMESTAMP,
+    google_id             VARCHAR(255) UNIQUE,
+    created_at            TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    last_login            TIMESTAMP
 );
 
 CREATE TABLE IF NOT EXISTS chat_sessions (
@@ -131,6 +135,32 @@ BEGIN
         ALTER TABLE queries ADD COLUMN language_detected    VARCHAR(20);
         ALTER TABLE queries ADD COLUMN original_query       TEXT;
         ALTER TABLE queries ADD COLUMN rewritten_query      TEXT;
+    END IF;
+
+    -- users: email verification + google oauth columns
+    IF NOT EXISTS (
+        SELECT 1 FROM information_schema.columns
+        WHERE table_name='users' AND column_name='is_verified'
+    ) THEN
+        ALTER TABLE users ADD COLUMN is_verified BOOLEAN DEFAULT FALSE;
+    END IF;
+    IF NOT EXISTS (
+        SELECT 1 FROM information_schema.columns
+        WHERE table_name='users' AND column_name='verification_code'
+    ) THEN
+        ALTER TABLE users ADD COLUMN verification_code VARCHAR(6);
+    END IF;
+    IF NOT EXISTS (
+        SELECT 1 FROM information_schema.columns
+        WHERE table_name='users' AND column_name='verification_expires'
+    ) THEN
+        ALTER TABLE users ADD COLUMN verification_expires TIMESTAMP;
+    END IF;
+    IF NOT EXISTS (
+        SELECT 1 FROM information_schema.columns
+        WHERE table_name='users' AND column_name='google_id'
+    ) THEN
+        ALTER TABLE users ADD COLUMN google_id VARCHAR(255) UNIQUE;
     END IF;
 END
 $$;
@@ -470,6 +500,88 @@ async def update_last_login(user_id: int):
             )
     except Exception as e:
         print(f"[DB] Error updating last_login: {e}")
+
+
+async def set_verification_code(email: str, code: str, expires_at) -> bool:
+    """Store OTP code and expiry for a user."""
+    if not db_pool:
+        return False
+    try:
+        async with db_pool.acquire() as conn:
+            await conn.execute(
+                "UPDATE users SET verification_code = $1, verification_expires = $2 WHERE email = $3",
+                code, expires_at, email,
+            )
+        return True
+    except Exception as e:
+        print(f"[DB] Error setting verification code: {e}")
+        return False
+
+
+async def verify_user_email(email: str, code: str) -> bool:
+    """Verify OTP and mark user as verified. Returns True if successful."""
+    if not db_pool:
+        return False
+    try:
+        async with db_pool.acquire() as conn:
+            row = await conn.fetchrow(
+                "SELECT verification_code, verification_expires FROM users WHERE email = $1",
+                email,
+            )
+            if not row:
+                return False
+            if row["verification_code"] != code:
+                return False
+            from datetime import datetime
+            if row["verification_expires"] and row["verification_expires"] < datetime.utcnow():
+                return False
+            await conn.execute(
+                "UPDATE users SET is_verified = TRUE, verification_code = NULL, verification_expires = NULL WHERE email = $1",
+                email,
+            )
+        return True
+    except Exception as e:
+        print(f"[DB] Error verifying user: {e}")
+        return False
+
+
+async def get_or_create_google_user(google_id: str, email: str, full_name: str, avatar_url: str = None) -> Optional[Dict]:
+    """Find user by google_id, or create a new verified user. Returns user dict."""
+    if not db_pool:
+        return None
+    try:
+        async with db_pool.acquire() as conn:
+            # Check if user exists by google_id
+            row = await conn.fetchrow(
+                "SELECT * FROM users WHERE google_id = $1", google_id
+            )
+            if row:
+                return dict(row)
+            # Check if email exists (user registered with email, now linking Google)
+            row = await conn.fetchrow(
+                "SELECT * FROM users WHERE email = $1", email
+            )
+            if row:
+                # Link Google ID to existing account and verify
+                await conn.execute(
+                    "UPDATE users SET google_id = $1, is_verified = TRUE, provider = 'google', avatar_url = COALESCE($2, avatar_url) WHERE email = $3",
+                    google_id, avatar_url, email,
+                )
+                updated = await conn.fetchrow("SELECT * FROM users WHERE email = $1", email)
+                return dict(updated) if updated else None
+            # Create new Google user (auto-verified, no password)
+            row = await conn.fetchrow(
+                """
+                INSERT INTO users (email, full_name, hashed_pw, provider, google_id, is_verified, avatar_url)
+                VALUES ($1, $2, '', 'google', $3, TRUE, $4)
+                RETURNING id, email, full_name, provider, avatar_url, is_active, is_verified, created_at
+                """,
+                email, full_name, google_id, avatar_url,
+            )
+            return dict(row) if row else None
+    except Exception as e:
+        print(f"[DB] Error with Google user: {e}")
+        return None
 
 
 # ─── Chat Session Operations ──────────────────────────────────────────────────

@@ -1,8 +1,10 @@
 """
 Auth Module — JWT-based authentication for production_agentic.py
 Uses passlib+bcrypt for password hashing, python-jose for JWT.
+Includes Google OAuth token verification.
 """
 import os
+import httpx
 from datetime import datetime, timedelta
 from typing import Optional, Dict
 
@@ -18,6 +20,7 @@ load_dotenv()
 SECRET_KEY = os.getenv("SECRET_KEY", "super-secret-random-string-change-this-12345")
 ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_HOURS = 24
+GOOGLE_CLIENT_ID = os.getenv("GOOGLE_CLIENT_ID", "")
 
 # ─── Password Hashing ─────────────────────────────────────────────────────────
 
@@ -91,4 +94,39 @@ async def get_optional_user(request: Request) -> Optional[Dict]:
     try:
         return decode_jwt(token)
     except HTTPException:
+        return None
+
+
+# ─── Google OAuth Token Verification ──────────────────────────────────────────
+
+async def verify_google_token(id_token: str) -> Optional[Dict]:
+    """
+    Verify a Google ID token via Google's tokeninfo endpoint.
+    Returns user info dict {sub, email, name, picture} or None on failure.
+    """
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            resp = await client.get(
+                f"https://oauth2.googleapis.com/tokeninfo?id_token={id_token}"
+            )
+            if resp.status_code != 200:
+                print(f"[GOOGLE AUTH] Token verification failed: {resp.status_code}")
+                return None
+
+            data = resp.json()
+
+            # Verify the token is for our app
+            if data.get("aud") != GOOGLE_CLIENT_ID:
+                print(f"[GOOGLE AUTH] Token audience mismatch")
+                return None
+
+            return {
+                "sub": data.get("sub"),          # Google user ID
+                "email": data.get("email"),
+                "name": data.get("name", ""),
+                "picture": data.get("picture", ""),
+                "email_verified": data.get("email_verified", "false") == "true",
+            }
+    except Exception as e:
+        print(f"[GOOGLE AUTH] Error verifying token: {e}")
         return None
