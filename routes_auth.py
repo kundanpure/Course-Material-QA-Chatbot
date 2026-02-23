@@ -242,18 +242,17 @@ async def forgot_password(req: ForgotPasswordRequest):
     user = await db.get_user_by_email(email)
 
     if not user:
-        # Don't reveal whether the email exists
-        return {"message": "If an account exists with this email, a reset code has been sent."}
+        raise HTTPException(404, "No account found with this email address")
 
     if user.get("provider") == "google" and not user.get("hashed_pw"):
-        return {"message": "This account uses Google Sign-In. No password to reset."}
+        raise HTTPException(400, "This account uses Google Sign-In. Please login with Google instead.")
 
     otp = generate_otp()
     expires = datetime.utcnow() + timedelta(minutes=10)
     await db.set_verification_code(email, otp, expires)
     await send_password_reset_email(email, otp, user.get("full_name", ""))
 
-    return {"message": "If an account exists with this email, a reset code has been sent.", "email": email}
+    return {"message": "Reset code sent to your email", "email": email}
 
 
 @router.post("/reset-password")
