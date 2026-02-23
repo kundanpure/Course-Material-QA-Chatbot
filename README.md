@@ -3,11 +3,7 @@
 > **AI-powered study platform** with a 10-layer Agentic RAG pipeline, 5 query modes, email verification, Google OAuth, and real-time learning analytics.
 
 <p align="center">
-  <img src="screenshots/login.png" width="380" alt="Login Page" />
-  <img src="screenshots/signup.png" width="380" alt="Signup Page" />
-</p>
-<p align="center">
-  <img src="screenshots/otp_verify.png" width="380" alt="OTP Verification" />
+  <img src="screenshots/chat_dashboard.png" width="800" alt="StudyAI Chat Dashboard" />
 </p>
 
 ---
@@ -774,6 +770,56 @@ backend/
     │       └── StudyMaterialsPage.tsx
     └── index.html
 ```
+
+---
+
+## 📸 Screenshots
+
+### Authentication
+
+<p align="center">
+  <img src="screenshots/login.png" width="380" alt="Login Page" />
+  <img src="screenshots/signup.png" width="380" alt="Signup Page" />
+</p>
+<p align="center">
+  <img src="screenshots/otp_verify.png" width="380" alt="OTP Verification" />
+</p>
+
+### Chat Interface — PDF Upload & Auto-Detect Pipeline
+
+<p align="center">
+  <img src="screenshots/pdf_upload_autodetect.png" width="800" alt="PDF Upload with Auto Pipeline Detection" />
+</p>
+
+### Research Mode — Grounded Answers with Page Citations
+
+<p align="center">
+  <img src="screenshots/research_mode_answer.png" width="800" alt="Research Mode Answer with Citations" />
+</p>
+
+### Study Mode — Full Exam Preparation Guide
+
+<p align="center">
+  <img src="screenshots/study_mode_guide.png" width="800" alt="Study Mode - Table of Contents and Topic Summaries" />
+</p>
+
+### Multilingual Support — Hindi Query on English PDF
+
+<p align="center">
+  <img src="screenshots/multilingual_hindi.png" width="800" alt="Multilingual Response in Hindi" />
+</p>
+
+### Learning Progress Dashboard
+
+<p align="center">
+  <img src="screenshots/progress_dashboard.png" width="800" alt="Progress Dashboard with Topic Mastery" />
+</p>
+
+### Study Materials — Flashcards, Practice Tests & More
+
+<p align="center">
+  <img src="screenshots/study_materials.png" width="800" alt="Study Materials Page" />
+</p>
 
 ---
 

@@ -300,7 +300,7 @@ export default function SignupPage() {
                                 value={fullName}
                                 onChange={(e) => setFullName(e.target.value)}
                                 className="input"
-                                placeholder="John Doe"
+                                placeholder="Kundan Kumar"
                                 required
                                 autoFocus
                             />
