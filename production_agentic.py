@@ -47,6 +47,7 @@ import db_postgres as db
 # Auth + Chat History routes
 from routes_auth import router as auth_router
 from routes_chat_history import router as chat_history_router
+from routes_evaluation import router as evaluation_router
 from auth import get_optional_user
 from llm_provider import llm_generate, get_provider_info
 
@@ -138,19 +139,6 @@ class QueryResponse(BaseModel):
     metadata:  QueryMetadata
     cached:    bool = False
 
-class EvaluationRequest(BaseModel):
-    question: str
-    student_answer: str
-    grading_mode: str = "moderate"  # "lenient" | "moderate" | "strict"
-
-
-class EvaluationResponse(BaseModel):
-    score: float
-    strengths: List[str]
-    missing_concepts: List[str]
-    improvements: List[str]
-    model_answer: str
-    grading_mode: str
 
 # ─── Global State ─────────────────────────────────────────────────────────────
 
@@ -183,6 +171,7 @@ app.add_middleware(
 
 app.include_router(auth_router)
 app.include_router(chat_history_router)
+app.include_router(evaluation_router)
 
 # ─── Startup / Shutdown ────────────────────────────────────────────────────────
 
@@ -953,42 +942,6 @@ async def auto_detect_mode(query: str) -> str:
         return "fast"
 
 
-# ─── Grading Prompt Builder ─────────────────────────────────────────────────────────────────
-def build_grading_prompt(question: str, student_answer: str, mode: str) -> str:
-    tone_instruction = {
-        "lenient": "Be supportive and slightly forgiving. Reward partial understanding.",
-        "moderate": "Grade like a normal university professor. Be fair and balanced.",
-        "strict": "Grade very strictly. Penalize missing depth, incomplete explanations, and lack of precision."
-    }.get(mode.lower(), "Grade like a normal university professor.")
-
-    return f"""
-You are a university professor evaluating an exam answer.
-
-Grading style: {tone_instruction}
-
-Question:
-{question}
-
-Student Answer:
-{student_answer}
-
-Evaluate based on:
-1. Concept correctness
-2. Completeness
-3. Depth of explanation
-4. Clarity
-
-Return ONLY valid JSON in this exact format:
-
-{{
-  "score": number between 0 and 10,
-  "strengths": ["point1", "point2"],
-  "missing_concepts": ["point1", "point2"],
-  "improvements": ["point1", "point2"],
-  "model_answer": "ideal full-mark answer"
-}}
-"""
-
 
 # ─── API Routes ────────────────────────────────────────────────────────────────
 
@@ -1031,32 +984,6 @@ async def health():
     return await health_check()
 
 
-@app.post("/api/v1/evaluate", response_model=EvaluationResponse)
-async def evaluate_answer(request: EvaluationRequest):
-    try:
-        prompt = build_grading_prompt(
-            request.question,
-            request.student_answer,
-            request.grading_mode
-        )
-
-        response_text, tokens = await llm_generate(prompt)
-
-        import json
-        data = json.loads(response_text)
-
-        return EvaluationResponse(
-            score=float(data.get("score", 0)),
-            strengths=data.get("strengths", []),
-            missing_concepts=data.get("missing_concepts", []),
-            improvements=data.get("improvements", []),
-            model_answer=data.get("model_answer", ""),
-            grading_mode=request.grading_mode
-        )
-
-    except Exception as e:
-        print(f"[EVALUATION ERROR] {e}")
-        raise HTTPException(status_code=500, detail="Evaluation failed")
 
 
 async def health_check():
