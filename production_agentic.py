@@ -47,6 +47,7 @@ import db_postgres as db
 # Auth + Chat History routes
 from routes_auth import router as auth_router
 from routes_chat_history import router as chat_history_router
+from routes_evaluation import router as evaluation_router
 from auth import get_optional_user
 from llm_provider import llm_generate, get_provider_info
 
@@ -138,6 +139,7 @@ class QueryResponse(BaseModel):
     metadata:  QueryMetadata
     cached:    bool = False
 
+
 # ─── Global State ─────────────────────────────────────────────────────────────
 
 documents_store: Dict[str, Dict] = {}   # doc_id → {filename, text, chunks, embeddings, page_count}
@@ -169,6 +171,7 @@ app.add_middleware(
 
 app.include_router(auth_router)
 app.include_router(chat_history_router)
+app.include_router(evaluation_router)
 
 # ─── Startup / Shutdown ────────────────────────────────────────────────────────
 
@@ -938,6 +941,8 @@ async def auto_detect_mode(query: str) -> str:
     except Exception:
         return "fast"
 
+
+
 # ─── API Routes ────────────────────────────────────────────────────────────────
 
 @app.get("/")
@@ -975,6 +980,12 @@ async def root():
 
 
 @app.get("/api/v1/health")
+async def health():
+    return await health_check()
+
+
+
+
 async def health_check():
     embed = EmbeddingService.get()
     return {

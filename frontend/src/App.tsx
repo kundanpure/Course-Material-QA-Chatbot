@@ -16,11 +16,13 @@ import {
   Trash2,
   History,
   Loader2,
+  FileText,
 
 } from 'lucide-react';
 import ChatPage from './pages/ChatPage';
 import DashboardPage from './pages/DashboardPage.tsx';
 import StudyMaterialsPage from './pages/StudyMaterialsPage.tsx';
+import EvaluatePage from './pages/EvaluatePage';
 import LoginPage from './pages/LoginPage';
 import SignupPage from './pages/SignupPage';
 import ForgotPasswordPage from './pages/ForgotPasswordPage';
@@ -183,6 +185,7 @@ function AppLayout() {
           <NavLink to="/" icon={<MessageSquare size={20} />} label="Chat" />
           <NavLink to="/dashboard" icon={<BarChart3 size={20} />} label="Progress" badge="7 🔥" />
           <NavLink to="/study-materials" icon={<BookOpen size={20} />} label="Study Materials" />
+          <NavLink to="/evaluate" icon={<FileText size={20} />} label="Evaluate Mode" />
         </nav>
 
         {/* Chat History */}
@@ -265,6 +268,7 @@ function AppLayout() {
           />
           <Route path="/dashboard" element={<DashboardPage />} />
           <Route path="/study-materials" element={<StudyMaterialsPage />} />
+          <Route path="/evaluate" element={<EvaluatePage />} />
         </Routes>
       </main>
     </div>
