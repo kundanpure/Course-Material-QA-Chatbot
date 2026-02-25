@@ -1595,7 +1595,7 @@ if __name__ == "__main__":
     print("  1. Query Classification              (rule-based + heuristic)")
     print("  2. Query Rewriting Agent             (Gemini)")
     print("  3. Hybrid Retrieval                  (FAISS cosine + BM25 Okapi)")
-    print("  4. MMR Diversification               (λ=0.70)")
+    print("  4. MMR Diversification               (lambda=0.70)")
     print("  5. Structured Context Assembly       (Page + Section aware)")
     print("  6. Answer Generation                 (LLM)")
     print("  7. Reflection / Validation Agent     (LLM)")
