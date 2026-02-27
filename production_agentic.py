@@ -1615,8 +1615,9 @@ if __name__ == "__main__":
     llm_info = get_provider_info()
     print(f"LLM Provider : {llm_info['provider'].upper()} ({llm_info['model']})")
     print(f"Embed Model  : {EmbeddingService.MODEL_NAME}")
-    print(f"Server       : http://localhost:8000")
-    print(f"API Docs     : http://localhost:8000/docs")
+    port = int(os.getenv("PORT", 8000))
+    print(f"Server       : http://localhost:{port}")
+    print(f"API Docs     : http://localhost:{port}/docs")
     print("=" * 70)
 
-    uvicorn.run(app, host="0.0.0.0", port=8000, log_level="info")
+    uvicorn.run(app, host="0.0.0.0", port=port, log_level="info")
