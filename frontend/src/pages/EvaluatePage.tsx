@@ -14,12 +14,24 @@ interface EvaluationResult {
   grading_mode: string;
 }
 
+// ── Helper: extract text from PDF/DOCX in-browser via backend ─────────────────
+async function extractTextFromFile(file: File): Promise<string> {
+  const formData = new FormData();
+  formData.append("file", file);
+  const response = await apiClient.post("/api/v1/extract-text", formData, {
+    headers: { "Content-Type": "multipart/form-data" },
+  });
+  return response.data.text as string;
+}
+
 export default function EvaluatePage() {
   const [difficulty, setDifficulty] = useState<Difficulty>("moderate");
   const [question, setQuestion] = useState("");
   const [answer, setAnswer] = useState("");
   const [file, setFile] = useState<File | null>(null);
   const [loading, setLoading] = useState(false);
+  const [extractingQuestion, setExtractingQuestion] = useState(false);
+  const [extractingAnswer, setExtractingAnswer] = useState(false);
   const [result, setResult] = useState<EvaluationResult | null>(null);
   const [showModelAnswer, setShowModelAnswer] = useState(false);
   const [questionFile, setQuestionFile] = useState<File | null>(null);
@@ -27,6 +39,43 @@ export default function EvaluatePage() {
 
   const isDisabled = !question.trim() || !answer.trim() || loading;
 
+  // ── Question file upload: extract text → populate textarea ─────────────────
+  const handleQuestionFileChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const selected = e.target.files?.[0] || null;
+    setQuestionFile(selected);
+    if (!selected) return;
+
+    try {
+      setExtractingQuestion(true);
+      const text = await extractTextFromFile(selected);
+      setQuestion(text);
+    } catch (err) {
+      console.error("Failed to extract question text:", err);
+      alert("Could not extract text from the question file. Please paste it manually.");
+    } finally {
+      setExtractingQuestion(false);
+    }
+  };
+
+  // ── Answer file upload: extract text → populate textarea ───────────────────
+  const handleAnswerFileChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const selected = e.target.files?.[0] || null;
+    setAnswerFile(selected);
+    if (!selected) return;
+
+    try {
+      setExtractingAnswer(true);
+      const text = await extractTextFromFile(selected);
+      setAnswer(text);
+    } catch (err) {
+      console.error("Failed to extract answer text:", err);
+      alert("Could not extract text from the answer file. Please paste it manually.");
+    } finally {
+      setExtractingAnswer(false);
+    }
+  };
+
+  // ── Evaluate: send question + answer + optional reference file ─────────────
   const handleEvaluate = async () => {
     if (isDisabled) return;
 
@@ -34,11 +83,27 @@ export default function EvaluatePage() {
     setResult(null);
 
     try {
-      const response = await apiClient.post("/api/v1/evaluate", {
-        question,
-        student_answer: answer,
-        grading_mode: difficulty,
-      });
+      let response;
+
+      if (file) {
+        // Send as multipart/form-data so the reference file travels with the request
+        const formData = new FormData();
+        formData.append("question", question);
+        formData.append("student_answer", answer);
+        formData.append("grading_mode", difficulty);
+        formData.append("reference_file", file);
+
+        response = await apiClient.post("/api/v1/evaluate", formData, {
+          headers: { "Content-Type": "multipart/form-data" },
+        });
+      } else {
+        // No reference file — plain JSON as before
+        response = await apiClient.post("/api/v1/evaluate", {
+          question,
+          student_answer: answer,
+          grading_mode: difficulty,
+        });
+      }
 
       setResult(response.data);
     } catch (err) {
@@ -90,68 +155,82 @@ export default function EvaluatePage() {
       {/* 🟡 Question */}
       <div className="space-y-2">
         <label className="font-semibold">Exam Question</label>
-        {/* Upload button for Question */}
-          <label className="inline-flex items-center space-x-2 cursor-pointer bg-gray-100 dark:bg-dark-700 px-4 py-2 rounded-lg hover:bg-gray-200 dark:hover:bg-dark-600 w-fit">
-            <Upload size={16} />
-            <span className="text-sm">Upload Question PDF/DOCX</span>
-            <input
-                type="file"
-                accept=".pdf,.doc,.docx"
-                hidden
-                onChange={(e) => setQuestionFile(e.target.files?.[0] || null)}
-            />
-          </label>
+        <label className="inline-flex items-center space-x-2 cursor-pointer bg-gray-100 dark:bg-dark-700 px-4 py-2 rounded-lg hover:bg-gray-200 dark:hover:bg-dark-600 w-fit">
+          <Upload size={16} />
+          <span className="text-sm">
+            {extractingQuestion ? "Extracting..." : "Upload Question PDF/DOCX"}
+          </span>
+          <input
+            type="file"
+            accept=".pdf,.doc,.docx"
+            hidden
+            disabled={extractingQuestion}
+            onChange={handleQuestionFileChange}
+          />
+        </label>
 
-        {questionFile && (
-            <p className="text-sm text-green-600 dark:text-green-400">
-                Uploaded: {questionFile.name}
-            </p>
-            )}
+        {questionFile && !extractingQuestion && (
+          <p className="text-sm text-green-600 dark:text-green-400">
+            ✅ Extracted: {questionFile.name}
+          </p>
+        )}
+        {extractingQuestion && (
+          <p className="text-sm text-blue-500 animate-pulse">⏳ Extracting text from file...</p>
+        )}
+
         <textarea
-            rows={4}
-            value={question}
-            onChange={(e) => setQuestion(e.target.value)}
-            className="w-full p-4 rounded-xl border dark:border-dark-600 bg-white dark:bg-dark-800"
-            placeholder="Enter the exam question..."
+          rows={4}
+          value={question}
+          onChange={(e) => setQuestion(e.target.value)}
+          className="w-full p-4 rounded-xl border dark:border-dark-600 bg-white dark:bg-dark-800"
+          placeholder="Enter the exam question or upload a file above..."
         />
       </div>
 
       {/* 🟠 Student Answer */}
-    <div className="space-y-2">
-    <label className="font-semibold">Your Answer</label>
+      <div className="space-y-2">
+        <label className="font-semibold">Your Answer</label>
 
-    {/* Upload button for Answer */}
-    <label className="inline-flex items-center space-x-2 cursor-pointer bg-gray-100 dark:bg-dark-700 px-4 py-2 rounded-lg hover:bg-gray-200 dark:hover:bg-dark-600 w-fit">
-        <Upload size={16} />
-        <span className="text-sm">Upload Answer PDF/DOCX</span>
-        <input
-        type="file"
-        accept=".pdf,.doc,.docx"
-        hidden
-        onChange={(e) => setAnswerFile(e.target.files?.[0] || null)}
+        <label className="inline-flex items-center space-x-2 cursor-pointer bg-gray-100 dark:bg-dark-700 px-4 py-2 rounded-lg hover:bg-gray-200 dark:hover:bg-dark-600 w-fit">
+          <Upload size={16} />
+          <span className="text-sm">
+            {extractingAnswer ? "Extracting..." : "Upload Answer PDF/DOCX"}
+          </span>
+          <input
+            type="file"
+            accept=".pdf,.doc,.docx"
+            hidden
+            disabled={extractingAnswer}
+            onChange={handleAnswerFileChange}
+          />
+        </label>
+
+        {answerFile && !extractingAnswer && (
+          <p className="text-sm text-green-600 dark:text-green-400">
+            ✅ Extracted: {answerFile.name}
+          </p>
+        )}
+        {extractingAnswer && (
+          <p className="text-sm text-blue-500 animate-pulse">⏳ Extracting text from file...</p>
+        )}
+
+        <textarea
+          rows={8}
+          value={answer}
+          onChange={(e) => setAnswer(e.target.value)}
+          className="w-full p-4 rounded-xl border dark:border-dark-600 bg-white dark:bg-dark-800"
+          placeholder="Write your answer here or upload a file above..."
         />
-    </label>
+      </div>
 
-    {answerFile && (
-        <p className="text-sm text-green-600 dark:text-green-400">
-        Uploaded: {answerFile.name}
-        </p>
-    )}
-
-    <textarea
-        rows={8}
-        value={answer}
-        onChange={(e) => setAnswer(e.target.value)}
-        className="w-full p-4 rounded-xl border dark:border-dark-600 bg-white dark:bg-dark-800"
-        placeholder="Write your answer here..."
-    />
-    </div>
-
-      {/* 🟢 Attachment */}
+      {/* 🟢 Reference Material */}
       <div className="space-y-2">
         <label className="font-semibold">
           📎 Attach Reference Material (optional)
         </label>
+        <p className="text-xs text-gray-500 dark:text-gray-400">
+          If provided, the AI will grade the answer against this material.
+        </p>
         <label className="inline-flex items-center space-x-2 cursor-pointer bg-gray-100 dark:bg-dark-700 px-4 py-2 rounded-lg hover:bg-gray-200 dark:hover:bg-dark-600">
           <Upload size={16} />
           <span>Upload PDF/DOCX</span>
@@ -164,7 +243,7 @@ export default function EvaluatePage() {
         </label>
         {file && (
           <p className="text-sm text-green-600 dark:text-green-400">
-            Attached: {file.name}
+            📎 Attached: {file.name}
           </p>
         )}
       </div>
