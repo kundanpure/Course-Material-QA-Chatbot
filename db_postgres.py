@@ -8,7 +8,7 @@ import json
 import pickle
 import numpy as np
 from typing import List, Dict, Optional, Any
-from datetime import datetime
+from datetime import datetime, timezone
 import os
 from dotenv import load_dotenv
 
@@ -533,7 +533,7 @@ async def verify_user_email(email: str, code: str) -> bool:
             if row["verification_code"] != code:
                 return False
             from datetime import datetime
-            if row["verification_expires"] and row["verification_expires"] < datetime.utcnow():
+            if row["verification_expires"] and row["verification_expires"].replace(tzinfo=timezone.utc) < datetime.now(timezone.utc):
                 return False
             await conn.execute(
                 "UPDATE users SET is_verified = TRUE, verification_code = NULL, verification_expires = NULL WHERE email = $1",
