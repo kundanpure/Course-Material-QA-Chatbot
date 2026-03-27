@@ -93,7 +93,7 @@ export default function EvaluatePage() {
         formData.append("grading_mode", difficulty);
         formData.append("reference_file", file);
 
-        response = await apiClient.post("/api/v1/evaluate", formData, {
+        response = await apiClient.post("/api/v1/evaluate/with-reference", formData, {
           headers: { "Content-Type": "multipart/form-data" },
         });
       } else {
