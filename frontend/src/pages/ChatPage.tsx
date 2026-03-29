@@ -13,16 +13,19 @@ import {
 } from 'lucide-react';
 import { askQuestion, uploadDocument, createSession, getSessionMessages, type ChatSession } from '../services/api';
 import MarkdownRenderer from '../components/MarkdownRenderer';
+import ReplyPreview from '../components/ReplyPreview';
 
 // ─── Types ─────────────────────────────────────────────────────────────────────
 
 interface Message {
+    id: string;
     role: 'user' | 'assistant';
     content: string;
     timestamp: Date;
     confidence?: number;
     citations?: any[];
     mode?: PipelineMode;
+    reply_to?: string | null;
 }
 
 type PipelineMode = 'auto' | 'fast' | 'study' | 'research' | 'chat';
@@ -103,11 +106,13 @@ interface ChatPageProps {
 export default function ChatPage({ sessionId, onSessionCreated }: ChatPageProps) {
     const [messages, setMessages] = useState<Message[]>([
         {
+            id: 'welcome',
             role: 'assistant',
             content: "Hi! I'm StudyAI — your intelligent study companion. 📚\n\nUpload a PDF and ask me anything, or just chat!\n\n**Modes available:**\n🤖 Auto · ⚡ Fast · 📚 Study · 🔬 Research · 💬 Chat",
             timestamp: new Date(),
         }
     ]);
+    const [replyTo, setReplyTo] = useState<Message | null>(null);
     const [input, setInput] = useState('');
     const [loading, setLoading] = useState(false);
     const [uploadedFile, setUploadedFile] = useState<File | null>(null);
@@ -132,7 +137,8 @@ export default function ChatPage({ sessionId, onSessionCreated }: ChatPageProps)
                 .then((msgs) => {
                     if (msgs.length > 0) {
                         setMessages(
-                            msgs.map((m) => ({
+                            msgs.map((m, i) => ({
+                                id: `loaded-${i}-${Date.now()}`,
                                 role: m.role as 'user' | 'assistant',
                                 content: m.content,
                                 timestamp: new Date(m.created_at),
@@ -144,6 +150,7 @@ export default function ChatPage({ sessionId, onSessionCreated }: ChatPageProps)
                     } else {
                         // Empty session — show welcome
                         setMessages([{
+                            id: 'welcome-empty',
                             role: 'assistant',
                             content: "Hi! I'm StudyAI — your intelligent study companion. 📚\n\nUpload a PDF and ask me anything, or just chat!",
                             timestamp: new Date(),
@@ -156,6 +163,7 @@ export default function ChatPage({ sessionId, onSessionCreated }: ChatPageProps)
         } else {
             // No session selected — fresh chat
             setMessages([{
+                id: 'welcome-fresh',
                 role: 'assistant',
                 content: "Hi! I'm StudyAI — your intelligent study companion. 📚\n\nUpload a PDF and ask me anything, or just chat!\n\n**Modes available:**\n🤖 Auto · ⚡ Fast · 📚 Study · 🔬 Research · 💬 Chat",
                 timestamp: new Date(),
@@ -180,15 +188,18 @@ export default function ChatPage({ sessionId, onSessionCreated }: ChatPageProps)
         if (!input.trim() || loading) return;
 
         const userMessage: Message = {
+            id: Date.now().toString(),
             role: 'user',
             content: input,
             timestamp: new Date(),
             mode: selectedMode,
+            reply_to: replyTo ? replyTo.id : null,
         };
 
         setMessages(prev => [...prev, userMessage]);
         const currentInput = input;
         setInput('');
+        setReplyTo(null);
         setLoading(true);
 
         try {
@@ -215,6 +226,7 @@ export default function ChatPage({ sessionId, onSessionCreated }: ChatPageProps)
             });
 
             const aiMessage: Message = {
+                id: (Date.now() + 1).toString(),
                 role: 'assistant',
                 content: response.answer,
                 timestamp: new Date(),
@@ -227,6 +239,7 @@ export default function ChatPage({ sessionId, onSessionCreated }: ChatPageProps)
         } catch (error) {
             console.error('Backend error:', error);
             setMessages(prev => [...prev, {
+                id: (Date.now() + 2).toString(),
                 role: 'assistant',
                 content: '❌ Could not reach the backend. Make sure the server is running on http://localhost:8000',
                 timestamp: new Date(),
@@ -243,6 +256,7 @@ export default function ChatPage({ sessionId, onSessionCreated }: ChatPageProps)
         setUploadedFile(file);
 
         setMessages(prev => [...prev, {
+            id: `upload-${Date.now()}`,
             role: 'assistant',
             content: `⏳ Uploading "${file.name}"…`,
             timestamp: new Date(),
@@ -268,12 +282,14 @@ export default function ChatPage({ sessionId, onSessionCreated }: ChatPageProps)
                 setUploadedDocIds(prev => [...prev, res.document_id]);
             }
             setMessages(prev => [...prev.slice(0, -1), {
+                id: `upload-done-${Date.now()}`,
                 role: 'assistant',
                 content: `✅ **${file.name}** uploaded!\n\n📄 Pages: ${res.pages}\n📦 Chunks: ${res.chunks_created}\n⏱️ Time: ${(res.processing_time_ms / 1000).toFixed(1)}s\n\nAsk me anything — try **Study mode** for an exam plan! 🎓`,
                 timestamp: new Date(),
             }]);
         } catch {
             setMessages(prev => [...prev.slice(0, -1), {
+                id: `upload-fail-${Date.now()}`,
                 role: 'assistant',
                 content: `❌ Upload failed for "${file.name}". Is the server running?`,
                 timestamp: new Date(),
@@ -322,7 +338,8 @@ export default function ChatPage({ sessionId, onSessionCreated }: ChatPageProps)
                 <div className="max-w-4xl mx-auto space-y-6">
                     {messages.map((message, index) => (
                         <div
-                            key={index}
+                            key={message.id || index}
+                            id={`msg-${message.id}`}
                             className={`flex ${message.role === 'user' ? 'justify-end' : 'justify-start'} animate-slide-up`}
                         >
                             <div
@@ -331,6 +348,23 @@ export default function ChatPage({ sessionId, onSessionCreated }: ChatPageProps)
                                     : 'bg-white dark:bg-dark-800 rounded-2xl rounded-tl-sm border border-gray-200 dark:border-dark-700'
                                     } p-4 shadow-lg`}
                             >
+                                {/* Reply context */}
+                                {message.reply_to && (
+                                    <div
+                                        className="bg-gray-100 dark:bg-dark-700 text-xs p-2 border-l-4 border-blue-400 mb-2 cursor-pointer rounded hover:bg-gray-200 dark:hover:bg-dark-600 transition-colors"
+                                        onClick={() => {
+                                            const el = document.getElementById(`msg-${message.reply_to}`);
+                                            if (el) el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+                                        }}
+                                    >
+                                        <span className="text-gray-500 dark:text-gray-400">↩ </span>
+                                        <span className="text-gray-700 dark:text-gray-300">
+                                            {messages.find(m => m.id === message.reply_to)?.content?.slice(0, 100)}
+                                            {(messages.find(m => m.id === message.reply_to)?.content?.length || 0) > 100 ? '…' : ''}
+                                        </span>
+                                    </div>
+                                )}
+
                                 {message.role === 'assistant' && (
                                     <div className="flex items-center justify-between mb-2">
                                         <div className="flex items-center space-x-2 text-primary-600">
@@ -354,6 +388,16 @@ export default function ChatPage({ sessionId, onSessionCreated }: ChatPageProps)
                                         <span>{message.timestamp.toLocaleTimeString()}</span>
                                     </div>
                                 )}
+
+                                {/* Reply button */}
+                                <div className="mt-2 text-right">
+                                    <button
+                                        onClick={() => setReplyTo(message)}
+                                        className="text-xs text-gray-400 hover:text-blue-500 dark:hover:text-blue-400 transition-colors"
+                                    >
+                                        ↩ Reply
+                                    </button>
+                                </div>
                             </div>
                         </div>
                     ))}
@@ -378,6 +422,12 @@ export default function ChatPage({ sessionId, onSessionCreated }: ChatPageProps)
             {/* ── Input Area ────────────────────────────────────────────── */}
             <div className="border-t border-gray-200 dark:border-dark-700 bg-white dark:bg-dark-800 p-4">
                 <div className="max-w-4xl mx-auto space-y-3">
+
+                    {/* Reply Preview */}
+                    <ReplyPreview
+                        replyTo={replyTo}
+                        onCancel={() => setReplyTo(null)}
+                    />
 
                     {/* Mode Selector Row */}
                     <div className="flex items-center space-x-2 overflow-x-auto pb-1 scrollbar-hide">
