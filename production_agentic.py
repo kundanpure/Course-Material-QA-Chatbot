@@ -44,10 +44,12 @@ from deep_translator import GoogleTranslator
 # NeonDB persistence layer
 import db_postgres as db
 
-# Auth + Chat History routes
+# Auth + Chat History + Progress + Study Materials routes
 from routes_auth import router as auth_router
 from routes_chat_history import router as chat_history_router
 from routes_evaluation import router as evaluation_router
+from routes_progress import router as progress_router
+from routes_study_materials import router as study_materials_router
 from auth import get_optional_user
 from llm_provider import llm_generate, get_provider_info
 
@@ -167,11 +169,13 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# ─── Register Auth + Chat History Routers ──────────────────────────────────────
+# ─── Register Auth + Chat History + Progress Routers ──────────────────────────
 
 app.include_router(auth_router)
 app.include_router(chat_history_router)
 app.include_router(evaluation_router)
+app.include_router(progress_router)
+app.include_router(study_materials_router)
 
 # ─── Startup / Shutdown ────────────────────────────────────────────────────────
 
@@ -1240,6 +1244,7 @@ async def ask_question(request: QueryRequest, raw_request: Request):
                 generation_time_ms=timing.get("generation_time_ms", 0), total_time_ms=total_time,
                 mmr_diversity_score=0.0, avg_retrieval_score=confidence, reflection_validated=False,
                 language_detected=lang_detected, original_query=original_query, rewritten_query=english_query,
+                user_id=user_id,
             )
             resp = QueryResponse(
                 answer=answer_text, citations=citations, confidence=confidence,
@@ -1290,6 +1295,7 @@ async def ask_question(request: QueryRequest, raw_request: Request):
                 generation_time_ms=gen["generation_time_ms"], total_time_ms=total_time,
                 mmr_diversity_score=1.0, avg_retrieval_score=1.0, reflection_validated=True,
                 language_detected=lang_detected, original_query=original_query, rewritten_query=english_query,
+                user_id=user_id,
             )
             resp = QueryResponse(
                 answer=answer, citations=cit_list[:20], confidence=0.92,
@@ -1388,6 +1394,7 @@ async def ask_question(request: QueryRequest, raw_request: Request):
                 language_detected=lang_detected,
                 original_query=original_query,
                 rewritten_query=rewritten_query,
+                user_id=user_id,
             )
 
             return QueryResponse(
@@ -1526,6 +1533,7 @@ async def ask_question(request: QueryRequest, raw_request: Request):
             language_detected=lang_detected,
             original_query=original_query,
             rewritten_query=rewritten_query,
+            user_id=user_id,
         )
 
         resp = QueryResponse(
@@ -1559,19 +1567,7 @@ async def ask_question(request: QueryRequest, raw_request: Request):
         raise HTTPException(500, str(e))
 
 
-@app.get("/api/v1/progress")
-async def get_progress():
-    """Return learning progress stats from NeonDB."""
-    analytics = await db.get_analytics()
-    return {
-        "documents_uploaded": analytics.get("total_documents", len(documents_store)),
-        "total_questions":    analytics.get("total_queries", 0),
-        "avg_confidence":     round(analytics.get("avg_confidence", 0.0), 4),
-        "reflection_rate":    round(analytics.get("reflection_rate", 0.0), 4),
-        "avg_retrieval_score": round(analytics.get("avg_retrieval_score", 0.0), 4),
-        "query_types":        analytics.get("query_types", {}),
-        "languages_used":     analytics.get("languages", {}),
-    }
+# NOTE: /api/v1/progress is now handled by routes_progress.py (per-user, authenticated)
 
 
 @app.get("/api/v1/query/history")

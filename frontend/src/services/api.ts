@@ -221,10 +221,45 @@ export const uploadDocument = async (file: File, sessionId?: number, tenantId?: 
 };
 
 /**
- * Get learning progress statistics
+ * Per-user learning progress data
  */
-export const getLearningProgress = async (): Promise<any> => {
-    const response = await apiClient.get('/api/v1/progress');
+export interface TopicProgress {
+    name: string;
+    question_count: number;
+    avg_confidence: number;
+    progress: number;
+    color: 'green' | 'yellow' | 'red';
+}
+
+export interface DailyActivity {
+    day: string;
+    date: string;
+    questions: number;
+}
+
+export interface Recommendation {
+    type: 'review' | 'continue' | 'streak';
+    message: string;
+    priority: 'high' | 'medium' | 'low';
+}
+
+export interface ProgressData {
+    total_questions: number;
+    avg_confidence: number;
+    study_streak: number;
+    total_study_time_min: number;
+    documents_uploaded: number;
+    topics: TopicProgress[];
+    weekly_activity: DailyActivity[];
+    recommendations: Recommendation[];
+    reflection_rate: number;
+}
+
+/**
+ * Get per-user learning progress statistics (requires auth)
+ */
+export const getLearningProgress = async (): Promise<ProgressData> => {
+    const response = await apiClient.get<ProgressData>('/api/v1/progress');
     return response.data;
 };
 
@@ -242,6 +277,93 @@ export const submitFeedback = async (
         comment,
     });
     return response.data;
+};
+
+// ============================================
+// Study Materials API
+// ============================================
+
+export interface TopicSuggestion {
+    name: string;
+    source: 'your_queries' | 'your_documents' | 'your_chats' | 'frequent_keywords' | 'popular';
+    count: number;
+}
+
+export type StudyTool = 'guide' | 'flashcards' | 'quiz' | 'concepts' | 'resources';
+
+export interface FlashcardItem {
+    question: string;
+    answer: string;
+    difficulty: 'easy' | 'medium' | 'hard';
+}
+
+export interface QuizQuestion {
+    id: number;
+    type: 'mcq' | 'short_answer';
+    question: string;
+    options: string[] | null;
+    correct_answer: string;
+    explanation: string;
+    difficulty: 'easy' | 'medium' | 'hard';
+}
+
+export interface ConceptNode {
+    name: string;
+    description: string;
+    children: ConceptNode[];
+}
+
+export interface ConceptMap {
+    root: string;
+    children: ConceptNode[];
+}
+
+export interface ResourceItem {
+    title: string;
+    type: 'video' | 'course' | 'documentation' | 'book' | 'interactive';
+    url: string;
+    description: string;
+    level: 'beginner' | 'intermediate' | 'advanced';
+}
+
+export interface StudyMaterialResult {
+    tool: StudyTool;
+    topic: string;
+    content: any; // string for guide, typed arrays/objects for others
+    generation_time_ms: number;
+    tokens_used: number;
+}
+
+/**
+ * Get dynamic topic suggestions for the current user
+ */
+export const getTopicSuggestions = async (): Promise<TopicSuggestion[]> => {
+    const response = await apiClient.get<{ topics: TopicSuggestion[] }>('/api/v1/study-materials/topics');
+    return response.data.topics;
+};
+
+/**
+ * Generate study material for a topic using a specific tool
+ */
+export const generateStudyMaterial = async (
+    topic: string,
+    tool: StudyTool,
+    doc_id?: string,
+): Promise<StudyMaterialResult> => {
+    const response = await apiClient.post<StudyMaterialResult>('/api/v1/study-materials/generate', {
+        topic,
+        tool,
+        doc_id: doc_id || null,
+    });
+    return response.data;
+};
+
+/**
+ * Get list of uploaded documents (for optional PDF context)
+ */
+export const getUploadedDocuments = async (): Promise<any[]> => {
+    const response = await apiClient.get('/api/v1/documents');
+    return response.data.documents;
 };
 
 /**

@@ -137,6 +137,15 @@ BEGIN
         ALTER TABLE queries ADD COLUMN rewritten_query      TEXT;
     END IF;
 
+    -- queries: per-user tracking
+    IF NOT EXISTS (
+        SELECT 1 FROM information_schema.columns
+        WHERE table_name='queries' AND column_name='user_id'
+    ) THEN
+        ALTER TABLE queries ADD COLUMN user_id INTEGER REFERENCES users(id);
+        CREATE INDEX IF NOT EXISTS idx_queries_user_id ON queries(user_id, created_at DESC);
+    END IF;
+
     -- users: email verification + google oauth columns
     IF NOT EXISTS (
         SELECT 1 FROM information_schema.columns
@@ -313,6 +322,8 @@ async def save_query(
     language_detected: str = "en",
     original_query: str = "",
     rewritten_query: str = "",
+    # per-user tracking
+    user_id: Optional[int] = None,
 ) -> Optional[int]:
     """Save query (with v4 analytics) to NeonDB and return row ID."""
     if not db_pool:
@@ -327,13 +338,15 @@ async def save_query(
                     confidence, chunks_retrieved, chunks_used, tokens_used,
                     retrieval_time_ms, generation_time_ms, total_time_ms,
                     mmr_diversity_score, avg_retrieval_score, reflection_validated,
-                    language_detected, original_query, rewritten_query
+                    language_detected, original_query, rewritten_query,
+                    user_id
                 ) VALUES (
                     $1,  $2,  $3,  $4,  $5,
                     $6,  $7,  $8,  $9,
                     $10, $11, $12,
                     $13, $14, $15,
-                    $16, $17, $18
+                    $16, $17, $18,
+                    $19
                 )
                 RETURNING id
                 """,
@@ -342,6 +355,7 @@ async def save_query(
                 retrieval_time_ms, generation_time_ms, total_time_ms,
                 mmr_diversity_score, avg_retrieval_score, reflection_validated,
                 language_detected, original_query, rewritten_query,
+                user_id,
             )
         return query_id
     except Exception as e:
@@ -764,4 +778,447 @@ async def get_session_doc_ids(session_id: int) -> List[str]:
             return [row["doc_id"] for row in rows]
     except Exception as e:
         print(f"[DB] Error getting session docs: {e}")
+        return []
+
+
+# ─── Per-User Progress ─────────────────────────────────────────────────────────
+
+async def get_user_progress(user_id: int) -> Dict[str, Any]:
+    """Compute per-user learning progress from queries + chat activity."""
+    if not db_pool:
+        return {}
+
+    try:
+        async with db_pool.acquire() as conn:
+            progress: Dict[str, Any] = {}
+
+            # ── Total questions asked by this user
+            progress["total_questions"] = await conn.fetchval(
+                "SELECT COUNT(*) FROM queries WHERE user_id = $1", user_id
+            ) or 0
+
+            # ── Average confidence
+            progress["avg_confidence"] = float(
+                await conn.fetchval(
+                    "SELECT COALESCE(AVG(confidence), 0) FROM queries WHERE user_id = $1 AND confidence > 0",
+                    user_id,
+                ) or 0
+            )
+
+            # ── Documents uploaded (via sessions owned by user)
+            progress["documents_uploaded"] = await conn.fetchval(
+                """
+                SELECT COUNT(DISTINCT sd.doc_id)
+                FROM session_documents sd
+                JOIN chat_sessions cs ON cs.id = sd.session_id
+                WHERE cs.user_id = $1
+                """,
+                user_id,
+            ) or 0
+
+            # ── Study streak (consecutive days with activity)
+            streak_rows = await conn.fetch(
+                """
+                SELECT DISTINCT DATE(created_at) as day
+                FROM chat_messages cm
+                JOIN chat_sessions cs ON cs.id = cm.session_id
+                WHERE cs.user_id = $1 AND cm.role = 'user'
+                ORDER BY day DESC
+                """,
+                user_id,
+            )
+            streak = 0
+            if streak_rows:
+                from datetime import date, timedelta
+                today = date.today()
+                expected = today
+                for row in streak_rows:
+                    d = row["day"]
+                    if isinstance(d, datetime):
+                        d = d.date()
+                    if d == expected:
+                        streak += 1
+                        expected -= timedelta(days=1)
+                    elif d == expected - timedelta(days=1):
+                        # Allow gap of 1 day (user might check at different times)
+                        expected = d
+                        streak += 1
+                        expected -= timedelta(days=1)
+                    else:
+                        break
+            progress["study_streak"] = streak
+
+            # ── Study time estimation (sum of per-session time, capped at 30min each)
+            session_times = await conn.fetch(
+                """
+                SELECT cm.session_id,
+                       EXTRACT(EPOCH FROM (MAX(cm.created_at) - MIN(cm.created_at))) / 60.0 as dur_min
+                FROM chat_messages cm
+                JOIN chat_sessions cs ON cs.id = cm.session_id
+                WHERE cs.user_id = $1
+                GROUP BY cm.session_id
+                HAVING COUNT(*) > 1
+                """,
+                user_id,
+            )
+            total_min = sum(min(float(r["dur_min"] or 0), 30.0) for r in session_times)
+            progress["total_study_time_min"] = round(total_min)
+
+            # ── Topics mastery (from query_type + query_text keywords)
+            topic_rows = await conn.fetch(
+                """
+                SELECT query_type,
+                       COUNT(*) as question_count,
+                       COALESCE(AVG(confidence), 0) as avg_conf
+                FROM queries
+                WHERE user_id = $1 AND query_type IS NOT NULL
+                GROUP BY query_type
+                ORDER BY question_count DESC
+                LIMIT 8
+                """,
+                user_id,
+            )
+            topics = []
+            for r in topic_rows:
+                avg_c = float(r["avg_conf"] or 0)
+                topics.append({
+                    "name": _format_topic_name(r["query_type"]),
+                    "question_count": r["question_count"],
+                    "avg_confidence": round(avg_c, 4),
+                    "progress": round(min(avg_c * 100, 100)),
+                    "color": "green" if avg_c >= 0.75 else ("yellow" if avg_c >= 0.5 else "red"),
+                })
+            progress["topics"] = topics
+
+            # ── Weekly activity (last 7 days of questions)
+            weekly = await conn.fetch(
+                """
+                SELECT DATE(created_at) as day, COUNT(*) as questions
+                FROM queries
+                WHERE user_id = $1
+                  AND created_at >= CURRENT_DATE - INTERVAL '6 days'
+                GROUP BY DATE(created_at)
+                ORDER BY day
+                """,
+                user_id,
+            )
+            from datetime import date, timedelta
+            weekly_map = {}
+            for r in weekly:
+                d = r["day"]
+                if isinstance(d, datetime):
+                    d = d.date()
+                weekly_map[d] = r["questions"]
+
+            today = date.today()
+            day_names = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
+            weekly_activity = []
+            for i in range(6, -1, -1):
+                d = today - timedelta(days=i)
+                weekly_activity.append({
+                    "day": day_names[d.weekday()],
+                    "date": d.isoformat(),
+                    "questions": weekly_map.get(d, 0),
+                })
+            progress["weekly_activity"] = weekly_activity
+
+            # ── Recommendations (AI-like suggestions based on data)
+            recs = []
+            # Low-confidence topics
+            for t in topics:
+                if t["avg_confidence"] < 0.5:
+                    recs.append({
+                        "type": "review",
+                        "message": f"Review {t['name']} — confidence is low ({t['progress']}%)",
+                        "priority": "high",
+                    })
+            # Streak encouragement
+            if streak > 0:
+                recs.append({
+                    "type": "streak",
+                    "message": f"Study today to maintain your {streak}-day streak 🔥",
+                    "priority": "medium",
+                })
+            elif progress["total_questions"] > 0:
+                recs.append({
+                    "type": "streak",
+                    "message": "Start a new study streak today! Consistency is key 📚",
+                    "priority": "medium",
+                })
+            # High-confidence celebration
+            for t in topics:
+                if t["avg_confidence"] >= 0.85:
+                    recs.append({
+                        "type": "continue",
+                        "message": f"Great progress on {t['name']}! 🎉",
+                        "priority": "low",
+                    })
+            if not recs:
+                recs.append({
+                    "type": "continue",
+                    "message": "Upload a PDF and start asking questions to track your progress!",
+                    "priority": "low",
+                })
+            progress["recommendations"] = recs[:5]  # cap at 5
+
+            # ── Reflection rate
+            progress["reflection_rate"] = float(
+                await conn.fetchval(
+                    "SELECT COALESCE(AVG(CASE WHEN reflection_validated THEN 1.0 ELSE 0.0 END), 0) FROM queries WHERE user_id = $1",
+                    user_id,
+                ) or 0
+            )
+
+            return progress
+
+    except Exception as e:
+        print(f"[DB] Error getting user progress: {e}")
+        import traceback; traceback.print_exc()
+        return {}
+
+
+def _format_topic_name(query_type: str) -> str:
+    """Format query_type enum into a readable topic name."""
+    name_map = {
+        "factual": "Factual Recall",
+        "conceptual": "Conceptual Understanding",
+        "comparison": "Comparative Analysis",
+        "summarization": "Summarization",
+        "listing": "List & Enumeration",
+        "general": "General Questions",
+        "document_study": "Document Study",
+        "chat": "Conversational",
+        "fast": "Quick Answers",
+    }
+    return name_map.get(query_type, query_type.replace("_", " ").title())
+
+
+# ─── Study Materials ──────────────────────────────────────────────────────────
+
+async def get_user_study_materials(user_id: int) -> Dict[str, Any]:
+    """Build study materials (flashcards, documents, notes) from user's Q&A history."""
+    if not db_pool:
+        return {"flashcards": [], "documents": [], "notes": [], "stats": {}}
+
+    try:
+        async with db_pool.acquire() as conn:
+            # ── Flashcards: auto-generate from high-quality Q&A pairs
+            qa_rows = await conn.fetch(
+                """
+                SELECT query_text, answer, confidence, query_type, created_at
+                FROM queries
+                WHERE user_id = $1
+                  AND confidence > 0.3
+                  AND query_type NOT IN ('chat')
+                  AND LENGTH(answer) > 20
+                ORDER BY confidence DESC, created_at DESC
+                LIMIT 50
+                """,
+                user_id,
+            )
+            flashcards = []
+            for r in qa_rows:
+                # Truncate answer for flashcard format (first 300 chars)
+                answer_text = r["answer"]
+                if len(answer_text) > 300:
+                    # Find a sentence boundary near 300 chars
+                    cut = answer_text[:300].rfind(".")
+                    if cut > 100:
+                        answer_text = answer_text[:cut + 1]
+                    else:
+                        answer_text = answer_text[:300] + "…"
+
+                flashcards.append({
+                    "question": r["query_text"],
+                    "answer": answer_text,
+                    "source": r["query_type"] or "general",
+                    "confidence": round(float(r["confidence"] or 0), 4),
+                    "topic": _format_topic_name(r["query_type"] or "general"),
+                })
+
+            # ── Documents: from user's sessions
+            doc_rows = await conn.fetch(
+                """
+                SELECT DISTINCT d.doc_id, d.filename, d.page_count,
+                       json_array_length(d.chunks::json) as chunk_count,
+                       d.uploaded_at,
+                       cs.title as session_title
+                FROM documents d
+                JOIN session_documents sd ON sd.doc_id = d.doc_id
+                JOIN chat_sessions cs ON cs.id = sd.session_id
+                WHERE cs.user_id = $1
+                ORDER BY d.uploaded_at DESC
+                """,
+                user_id,
+            )
+            documents = []
+            for r in doc_rows:
+                documents.append({
+                    "doc_id": r["doc_id"],
+                    "filename": r["filename"],
+                    "page_count": r["page_count"],
+                    "chunk_count": r["chunk_count"] or 0,
+                    "uploaded_at": str(r["uploaded_at"]),
+                    "session_title": r["session_title"],
+                })
+
+            # ── Study Notes: recent Q&A with good answers
+            note_rows = await conn.fetch(
+                """
+                SELECT id, query_text, answer, confidence, query_type, created_at
+                FROM queries
+                WHERE user_id = $1
+                  AND query_type NOT IN ('chat')
+                  AND LENGTH(answer) > 50
+                ORDER BY created_at DESC
+                LIMIT 20
+                """,
+                user_id,
+            )
+            notes = []
+            for r in note_rows:
+                notes.append({
+                    "query": r["query_text"],
+                    "answer": r["answer"],
+                    "confidence": round(float(r["confidence"] or 0), 4),
+                    "query_type": _format_topic_name(r["query_type"] or "general"),
+                    "created_at": str(r["created_at"]),
+                })
+
+            # ── Stats
+            total_flashcards = len(flashcards)
+            total_docs = len(documents)
+            total_notes = len(notes)
+            avg_conf = (
+                sum(f["confidence"] for f in flashcards) / total_flashcards
+                if total_flashcards > 0 else 0.0
+            )
+
+            stats = {
+                "total_flashcards": total_flashcards,
+                "total_documents": total_docs,
+                "total_notes": total_notes,
+                "avg_confidence": round(avg_conf, 4),
+            }
+
+            return {
+                "flashcards": flashcards,
+                "documents": documents,
+                "notes": notes,
+                "stats": stats,
+            }
+
+    except Exception as e:
+        print(f"[DB] Error getting study materials: {e}")
+        import traceback; traceback.print_exc()
+        return {"flashcards": [], "documents": [], "notes": [], "stats": {}}
+
+
+# ─── Dynamic Topic Suggestions ────────────────────────────────────────────────
+
+async def get_user_topics(user_id: int) -> List[Dict[str, Any]]:
+    """Extract topic suggestions from user's activity: query keywords, document names, chat titles."""
+    if not db_pool:
+        return []
+
+    try:
+        async with db_pool.acquire() as conn:
+            topics: List[Dict[str, Any]] = []
+            seen = set()
+
+            # 1. Topics from queries (most asked query types)
+            type_rows = await conn.fetch(
+                """
+                SELECT query_type, COUNT(*) as cnt
+                FROM queries
+                WHERE user_id = $1 AND query_type IS NOT NULL AND query_type NOT IN ('chat', 'greeting')
+                GROUP BY query_type
+                ORDER BY cnt DESC
+                LIMIT 5
+                """,
+                user_id,
+            )
+            for r in type_rows:
+                name = _format_topic_name(r["query_type"])
+                if name.lower() not in seen:
+                    seen.add(name.lower())
+                    topics.append({"name": name, "source": "your_queries", "count": r["cnt"]})
+
+            # 2. Topics from uploaded document filenames
+            doc_rows = await conn.fetch(
+                """
+                SELECT DISTINCT d.filename
+                FROM documents d
+                JOIN session_documents sd ON sd.doc_id = d.doc_id
+                JOIN chat_sessions cs ON cs.id = sd.session_id
+                WHERE cs.user_id = $1
+                ORDER BY d.uploaded_at DESC
+                LIMIT 5
+                """,
+                user_id,
+            )
+            for r in doc_rows:
+                # Extract topic from filename (remove extension, underscores, etc.)
+                raw = r["filename"]
+                name = raw.rsplit(".", 1)[0].replace("_", " ").replace("-", " ").strip()
+                if len(name) > 3 and name.lower() not in seen:
+                    seen.add(name.lower())
+                    topics.append({"name": name.title(), "source": "your_documents", "count": 0})
+
+            # 3. Topics from chat session titles
+            session_rows = await conn.fetch(
+                """
+                SELECT DISTINCT title
+                FROM chat_sessions
+                WHERE user_id = $1 AND title IS NOT NULL AND title != 'New Chat'
+                ORDER BY updated_at DESC
+                LIMIT 5
+                """,
+                user_id,
+            )
+            for r in session_rows:
+                name = r["title"].strip()
+                if len(name) > 3 and name.lower() not in seen:
+                    seen.add(name.lower())
+                    topics.append({"name": name, "source": "your_chats", "count": 0})
+
+            # 4. Extract keywords from recent queries (most frequent meaningful words)
+            keyword_rows = await conn.fetch(
+                """
+                SELECT query_text FROM queries
+                WHERE user_id = $1 AND LENGTH(query_text) > 10
+                ORDER BY created_at DESC LIMIT 30
+                """,
+                user_id,
+            )
+            stop_words = {
+                "what", "how", "why", "when", "where", "which", "who", "does", "the",
+                "is", "are", "was", "were", "can", "could", "would", "should", "will",
+                "this", "that", "these", "those", "from", "with", "about", "into",
+                "for", "and", "but", "not", "have", "has", "had", "been", "being",
+                "its", "it", "they", "their", "them", "you", "your", "our", "more",
+                "some", "any", "all", "each", "every", "most", "other", "own", "same",
+                "than", "too", "very", "just", "also", "between", "after", "before",
+                "during", "explain", "tell", "give", "make", "know", "help", "please",
+                "pdf", "document", "page", "file", "study", "exam",
+            }
+            word_freq: Dict[str, int] = {}
+            for r in keyword_rows:
+                words = r["query_text"].lower().split()
+                for w in words:
+                    w = w.strip("?.,!\"'()[]{}:;")
+                    if len(w) > 3 and w not in stop_words and not w.isdigit():
+                        word_freq[w] = word_freq.get(w, 0) + 1
+
+            # Take most frequent keywords as topic suggestions
+            sorted_words = sorted(word_freq.items(), key=lambda x: x[1], reverse=True)
+            for word, count in sorted_words[:6]:
+                if word.lower() not in seen and count >= 2:
+                    seen.add(word.lower())
+                    topics.append({"name": word.title(), "source": "frequent_keywords", "count": count})
+
+            return topics[:12]  # cap at 12 suggestions
+
+    except Exception as e:
+        print(f"[DB] Error getting user topics: {e}")
         return []
