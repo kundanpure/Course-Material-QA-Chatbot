@@ -1,10 +1,50 @@
 # StudyAI — Intelligent Study Companion 🎓
 
-> **AI-powered study platform** with a 10-layer Agentic RAG pipeline, 5 query modes, email verification, Google OAuth, and real-time learning analytics.
+> **AI-powered study platform** with a 10-layer Agentic RAG pipeline, 5 query modes, AI exam evaluation, study material generation, email verification, Google OAuth, and real-time learning analytics — **deployed live on Render + Netlify**.
 
 <p align="center">
   <img src="screenshots/chat_dashboard.png" width="800" alt="StudyAI Chat Dashboard" />
 </p>
+
+---
+
+## 🌐 Live Deployment
+
+| Service | Platform | URL |
+|---------|----------|-----|
+| **Backend API** | Render (Free Tier) | `https://studyai-backend.onrender.com` |
+| **Frontend App** | Netlify | `https://studyai-app.netlify.app` |
+| **API Docs** | Swagger UI | `https://studyai-backend.onrender.com/docs` |
+| **Database** | NeonDB (PostgreSQL) | Serverless PostgreSQL |
+
+### Deployment Architecture
+
+```mermaid
+graph LR
+    User[👨‍🎓 Student] -->|HTTPS| Netlify[Netlify CDN<br/>React Frontend]
+    Netlify -->|API Calls| Render[Render<br/>FastAPI Backend]
+    Render -->|SQL| Neon[(NeonDB<br/>PostgreSQL)]
+    Render -->|Embeddings| ONNX[ONNX Runtime<br/>fastembed]
+    Render -->|LLM Calls| Gemini[Google Gemini API]
+    Render -->|LLM Fallback| Groq[Groq Cloud API]
+    Render -->|Email| Gmail[Gmail SMTP]
+
+    style Netlify fill:#00c7b7,color:#fff
+    style Render fill:#46e3b7,color:#000
+    style Neon fill:#3ecf8e,color:#fff
+    style Gemini fill:#4285f4,color:#fff
+    style Groq fill:#f55036,color:#fff
+```
+
+### Deployment Stack Decisions
+
+| Concern | Decision | Rationale |
+|---------|----------|-----------|
+| **Embeddings** | `fastembed` (ONNX) instead of PyTorch | Render free tier has 512 MB RAM; PyTorch alone uses ~400 MB |
+| **Embedding Model** | `all-MiniLM-L6-v2` | 384-dim, fast, accurate — same model via ONNX |
+| **Workers** | 1 Uvicorn worker | RAM constraint; single-worker is sufficient |
+| **Frontend Host** | Netlify (separate) | Free, global CDN, auto-deploys from Git |
+| **Database** | NeonDB serverless | Free tier, auto-scaling, no cold-start penalty |
 
 ---
 
@@ -21,6 +61,8 @@
 | **Diversity** | May repeat same information | **MMR diversification** ensures varied, comprehensive results |
 | **Query Understanding** | One-size-fits-all | **5 specialized pipelines** auto-selected based on query type |
 | **Exam Prep** | Generic study advice | **Full-document study guides** with page recommendations |
+| **Exam Evaluation** | No grading capability | **AI exam grading** with 3 strictness modes + model answers |
+| **Study Materials** | Generic content | **5 AI tools**: guides, flashcards, quizzes, concept maps, resources |
 | **Multilingual** | Good but no explicit routing | **Auto-detects language**, retrieves in English, responds in user's language |
 | **Confidence** | No transparency | **6-factor confidence scoring** — you know exactly how reliable each answer is |
 | **Speed** | ~2-5s per response | **Fast Mode**: sub-second with FAISS-only retrieval |
@@ -46,7 +88,7 @@ Most RAG systems use a single retrieval method (usually just vector search). Stu
 
 ```mermaid
 graph TB
-    subgraph Frontend["🖥️ Frontend (React + Vite)"]
+    subgraph Frontend["🖥️ Frontend (React + Vite + TailwindCSS)"]
         UI[Chat Interface] --> AuthCtx[Auth Context]
         UI --> APILayer[API Service Layer]
         Login[Login Page] --> AuthCtx
@@ -54,6 +96,7 @@ graph TB
         ForgotPw[Forgot Password] --> APILayer
         Dashboard[Dashboard] --> APILayer
         StudyMat[Study Materials] --> APILayer
+        Evaluate[Exam Evaluator] --> APILayer
     end
 
     subgraph Backend["⚙️ Backend (FastAPI + Uvicorn)"]
@@ -61,6 +104,9 @@ graph TB
         Router --> QueryRoute[Query Pipeline]
         Router --> DocRoute[Document Upload]
         Router --> ChatHist[Chat History]
+        Router --> EvalRoute[Evaluation Routes]
+        Router --> StudyMatRoute[Study Materials Routes]
+        Router --> ProgressRoute[Progress Routes]
         
         AuthRoutes --> JWT[JWT Auth]
         AuthRoutes --> SMTP[Email OTP Service]
@@ -69,6 +115,7 @@ graph TB
         QueryRoute --> Pipeline[Agentic RAG Pipeline]
         DocRoute --> Chunker[PDF Chunker]
         Chunker --> Indexer[Index Builder]
+        EvalRoute --> EvalLLM[Eval LLM Provider]
     end
 
     subgraph Pipeline["🧠 10-Layer Agentic Pipeline"]
@@ -103,6 +150,7 @@ graph TB
     AuthRoutes --> PG
     ChatHist --> PG
     DocRoute --> PG
+    EvalRoute --> PG
     SMTP --> Gmail
     GoogleAPI --> GoogleAuth
 ```
@@ -232,10 +280,11 @@ Return only the rewritten query.
 Module: _semantic_scores()
 ```
 
-**What it does:** Converts the query into a 384-dimensional vector using `all-MiniLM-L6-v2` sentence transformer, then finds the most semantically similar document chunks using Facebook's FAISS index.
+**What it does:** Converts the query into a 384-dimensional vector using `all-MiniLM-L6-v2` (via ONNX/fastembed), then finds the most semantically similar document chunks using Facebook's FAISS index.
 
 **Technical details:**
 - **Embedding model:** `all-MiniLM-L6-v2` (384 dimensions, L2-normalized)
+- **Runtime:** ONNX (fastembed) — no PyTorch required, ~80 MB RAM
 - **Index type:** `IndexFlatIP` (inner product on L2-normalized vectors = cosine similarity)
 - **Returns:** `{chunk_index → cosine_score}` for top-K results
 
@@ -555,6 +604,7 @@ graph LR
   3. Key concepts, formulas, definitions
   4. Recommended reading plan with page ranges
   5. Potential exam questions
+- **Dynamic persona mode**: If the student asks to "solve", "evaluate", or act as a specific persona (e.g., "university topper"), the study prompt adapts accordingly
 
 ---
 
@@ -599,7 +649,7 @@ graph LR
     PDF[PDF Upload] --> EXT[Page-by-Page<br/>Text Extraction]
     EXT --> SEC[Section<br/>Detection]
     SEC --> CHUNK[Hierarchical<br/>Chunking]
-    CHUNK --> EMB[Sentence-Transformer<br/>Embedding]
+    CHUNK --> EMB[fastembed<br/>ONNX Embedding]
     EMB --> FAISS[FAISS Index<br/>Build]
     CHUNK --> TOK[Tokenization]
     TOK --> BM25[BM25 Index<br/>Build]
@@ -616,6 +666,57 @@ graph LR
 - **Overlap:** 150 words between chunks (prevents information loss at boundaries)
 - Each chunk preserves: `doc_id`, `page_num`, `section`, `start_pos`, `end_pos`
 - Section headers detected heuristically from first line of each chunk
+- **Content-hash doc IDs:** `doc_` + SHA-256 prefix → deterministic, deduplication-friendly
+
+**Session-document linking:**
+- Documents are linked to chat sessions (both in-memory and persisted to DB)
+- Queries are scoped to session-specific documents for multi-session isolation
+
+---
+
+## 📝 AI Exam Evaluation System
+
+StudyAI includes a dedicated **AI exam grading** feature with isolated LLM keys to prevent token budget conflicts with the RAG pipeline.
+
+```mermaid
+graph LR
+    Q[Question +<br/>Student Answer] --> MODE{Grading<br/>Mode?}
+    MODE -->|Lenient| L[Supportive<br/>Grading]
+    MODE -->|Moderate| M[Fair University<br/>Professor]
+    MODE -->|Strict| S[Strict<br/>Evaluator]
+    L --> LLM[Evaluation LLM]
+    M --> LLM
+    S --> LLM
+    LLM --> R["Score (0-10)<br/>Strengths<br/>Missing Concepts<br/>Improvements<br/>Model Answer"]
+
+    style Q fill:#f43f5e,color:#fff
+    style R fill:#f43f5e,color:#fff
+```
+
+### Features
+- **3 grading modes:** Lenient (supportive), Moderate (fair), Strict (penalizes gaps)
+- **Reference material support:** Upload PDF/DOCX as grading reference
+- **Structured output:** Score, strengths, missing concepts, improvements, model answer
+- **Separate LLM keys:** `EVAL_GEMINI_API_KEY` / `EVAL_GROQ_API_KEY` isolate evaluation budget
+- **Text extraction:** Supports PDF (via pdfplumber) and DOCX input
+
+---
+
+## 📚 Study Materials Hub
+
+A topic-based AI learning center with 5 specialized tools:
+
+| Tool | Output | Format |
+|------|--------|--------|
+| 📖 **Study Guide** | Comprehensive overview, prerequisites, key concepts, formulas, learning path, revision points | Markdown |
+| 🃏 **Flashcards** | 12 question-answer cards with difficulty levels | JSON array |
+| 📋 **Quiz** | 10 questions (7 MCQ + 3 short answer) with explanations | JSON array |
+| 🗺️ **Concept Map** | Hierarchical topic tree with descriptions | JSON tree |
+| 📎 **Resources** | 10 curated resources (videos, courses, books, tools) | JSON array |
+
+- All tools can be **enhanced with uploaded PDF content** for document-grounded material
+- Requires authentication (user-scoped)
+- Dynamic topic suggestions based on user's query history
 
 ---
 
@@ -648,22 +749,44 @@ Enter Email → OTP Email → Enter Code → Set New Password → Login
 
 ---
 
+## 📊 Learning Progress Dashboard
+
+Per-user analytics powered by query history:
+
+| Metric | Description |
+|--------|-------------|
+| **Total Questions** | Number of queries asked |
+| **Avg Confidence** | Mean confidence across all answers |
+| **Study Streak** | Consecutive days of activity |
+| **Study Time** | Estimated minutes spent studying |
+| **Documents Uploaded** | Number of PDFs uploaded |
+| **Topic Mastery** | Per-topic progress with question count and avg confidence |
+| **Weekly Activity** | Last 7 days of query activity |
+| **Recommendations** | AI-generated study suggestions |
+| **Reflection Rate** | Percentage of answers that passed reflection validation |
+
+---
+
 ## 🚀 Quick Start
 
 ### Prerequisites
 - **Python 3.11+**
 - **Node.js 18+**
-- **PostgreSQL** (NeonDB configured by default)
+- **PostgreSQL** (NeonDB or local)
 
 ### 1. Backend Setup
 
 ```bash
 cd backend
 
-pip install fastapi uvicorn google-generativeai pypdf python-dotenv asyncpg \
-  python-jose passlib bcrypt sentence-transformers faiss-cpu rank-bm25 \
-  langdetect deep-translator httpx aiosmtplib groq
+# Install dependencies
+pip install -r requirements-render.txt
 
+# Create .env from template
+cp .env.example .env
+# Edit .env with your keys
+
+# Run the server
 python production_agentic.py
 ```
 
@@ -679,29 +802,64 @@ npm run dev
 
 Frontend: `http://localhost:5173`
 
+### 3. Deploy to Render (Backend)
+
+1. Push code to GitHub
+2. Create new **Web Service** on Render
+3. Set **Build Command:** `pip install -r requirements-render.txt`
+4. Set **Start Command:** `uvicorn production_agentic:app --host 0.0.0.0 --port $PORT --workers 1 --timeout-keep-alive 120`
+5. Add all environment variables from `.env`
+6. Deploy (free tier works — `fastembed` keeps RAM under 512 MB)
+
+### 4. Deploy to Netlify (Frontend)
+
+1. Connect repository to Netlify
+2. Set **Base directory:** `frontend`
+3. Set **Build command:** `npm install && npm run build`
+4. Set **Publish directory:** `frontend/dist`
+5. Set **Node version:** `20`
+6. Add environment variable: `VITE_API_URL=https://your-render-url.onrender.com`
+
 ---
 
 ## 🔧 Environment Variables
 
 ```env
-# LLM
-GEMINI_API_KEY=your-key
-GROQ_API_KEY=your-key
-LLM_PROVIDER=groq
+# ═══════════════ LLM (RAG Pipeline) ═══════════════
+GEMINI_API_KEY=AIza...                    # Google Gemini API key
+GEMINI_MODEL=gemini-2.0-flash-exp         # Model for RAG pipeline
+LLM_PROVIDER=gemini                       # "gemini" or "groq"
+GROQ_API_KEY=gsk_...                      # Groq API key (optional fallback)
+GROQ_MODEL=llama-3.3-70b-versatile        # Groq model name
 
-# Database
+# ═══════════════ LLM (Evaluation — Isolated Keys) ═══════════════
+EVAL_LLM_PROVIDER=gemini                  # Separate provider for exam grading
+EVAL_GEMINI_API_KEY=AIza...               # Separate Gemini key for evaluation
+EVAL_GROQ_API_KEY=gsk_...                 # Separate Groq key for evaluation
+
+# ═══════════════ Database (NeonDB / PostgreSQL) ═══════════════
 DATABASE_URL=postgresql://user:pass@host/db?sslmode=require
+POSTGRES_HOST=your-neon-hostname.neon.tech
+POSTGRES_PORT=5432
+POSTGRES_USER=your-username
+POSTGRES_PASSWORD=your-password
+POSTGRES_DB=course_qa
 
-# Auth
-SECRET_KEY=your-secret-key
+# ═══════════════ Auth ═══════════════
+SECRET_KEY=your-random-secret-key         # JWT signing key
+GOOGLE_CLIENT_ID=xxx.apps.googleusercontent.com
+GOOGLE_CLIENT_SECRET=GOCSPX-...
 
-# Email Verification
-SMTP_EMAIL=your-email@example.com
-SMTP_PASSWORD=your-app-password
+# ═══════════════ Email (OTP Verification) ═══════════════
+SMTP_EMAIL=your-email@gmail.com
+SMTP_PASSWORD=your-app-password           # Gmail App Password (not login password)
 
-# Google OAuth
-GOOGLE_CLIENT_ID=your-client-id.apps.googleusercontent.com
-GOOGLE_CLIENT_SECRET=your-secret
+# ═══════════════ Server ═══════════════
+HOST=0.0.0.0
+PORT=8000
+DEBUG=True
+ENVIRONMENT=development
+ALLOWED_ORIGINS=http://localhost:3000,http://localhost:5173
 ```
 
 ---
@@ -711,20 +869,51 @@ GOOGLE_CLIENT_SECRET=your-secret
 ### Authentication
 | Method | Endpoint | Description |
 |--------|----------|-------------|
-| `POST` | `/api/v1/auth/register` | Register → sends OTP |
-| `POST` | `/api/v1/auth/verify-email` | Verify OTP code |
-| `POST` | `/api/v1/auth/login` | Login (verified only) |
-| `POST` | `/api/v1/auth/google` | Google OAuth login |
-| `POST` | `/api/v1/auth/forgot-password` | Send reset OTP |
-| `POST` | `/api/v1/auth/reset-password` | Reset with OTP |
-| `GET`  | `/api/v1/auth/me` | Get profile |
+| `POST` | `/api/v1/auth/register` | Register new account → sends OTP email |
+| `POST` | `/api/v1/auth/verify-email` | Verify 6-digit OTP code |
+| `POST` | `/api/v1/auth/login` | Login (verified accounts only) |
+| `POST` | `/api/v1/auth/google` | Google OAuth one-click login |
+| `POST` | `/api/v1/auth/forgot-password` | Send password reset OTP |
+| `POST` | `/api/v1/auth/reset-password` | Reset password with OTP |
+| `GET`  | `/api/v1/auth/me` | Get current user profile |
 
 ### RAG Pipeline
 | Method | Endpoint | Description |
 |--------|----------|-------------|
-| `POST` | `/api/v1/query/ask` | Ask (supports 5 modes) |
-| `POST` | `/api/v1/documents/upload` | Upload PDF |
-| `GET`  | `/api/v1/documents` | List documents |
+| `POST` | `/api/v1/query/ask` | Ask a question (supports 5 modes: auto/fast/study/research/chat) |
+| `POST` | `/api/v1/documents/upload` | Upload PDF document |
+| `GET`  | `/api/v1/documents` | List all uploaded documents |
+| `DELETE` | `/api/v1/documents/{doc_id}` | Delete a document |
+| `GET`  | `/api/v1/query/history` | Recent query history |
+
+### Chat History
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| `POST` | `/api/v1/chat/sessions` | Create new chat session |
+| `GET`  | `/api/v1/chat/sessions` | List user's chat sessions |
+| `GET`  | `/api/v1/chat/sessions/{id}/messages` | Get messages for a session |
+| `DELETE` | `/api/v1/chat/sessions/{id}` | Delete a chat session |
+
+### AI Evaluation
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| `POST` | `/api/v1/evaluate` | Grade an exam answer (JSON input) |
+| `POST` | `/api/v1/evaluate/with-reference` | Grade with reference material file |
+| `POST` | `/api/v1/extract-text` | Extract text from PDF/DOCX |
+
+### Study Materials
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| `POST` | `/api/v1/study-materials/generate` | Generate study material (guide/flashcards/quiz/concepts/resources) |
+| `GET`  | `/api/v1/study-materials/topics` | Get topic suggestions for user |
+
+### Analytics & Progress
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| `GET`  | `/api/v1/progress` | Per-user learning progress dashboard |
+| `GET`  | `/api/v1/analytics` | Global analytics |
+| `POST` | `/api/v1/feedback` | Submit feedback on query quality |
+| `GET`  | `/api/v1/health` | Health check + system status |
 
 ---
 
@@ -732,16 +921,20 @@ GOOGLE_CLIENT_SECRET=your-secret
 
 | Layer | Technology | Purpose |
 |-------|-----------|---------|
-| **LLM** | Gemini 2.0 Flash / Groq Llama 3.3 | Answer generation |
-| **Embeddings** | all-MiniLM-L6-v2 | 384-dim sentence vectors |
-| **Vector Search** | FAISS (IndexFlatIP) | Semantic similarity |
+| **LLM** | Gemini 2.0 Flash / Groq Llama 3.3 70B | Answer generation, query rewriting, reflection |
+| **Embeddings** | all-MiniLM-L6-v2 (via fastembed/ONNX) | 384-dim sentence vectors, ~80 MB RAM |
+| **Vector Search** | FAISS (IndexFlatIP) | Cosine semantic similarity |
 | **Keyword Search** | BM25 (Okapi) | Lexical retrieval |
 | **Backend** | FastAPI + Uvicorn | ASGI web server |
-| **Database** | PostgreSQL (NeonDB) | Persistent storage |
-| **Auth** | JWT + bcrypt + OAuth 2.0 | Authentication |
-| **Email** | aiosmtplib (Gmail) | OTP verification |
+| **Database** | PostgreSQL (NeonDB Serverless) | Persistent storage |
+| **PDF Parsing** | pypdf + pdfplumber | Text extraction |
+| **Auth** | JWT + bcrypt + Google OAuth 2.0 | Authentication |
+| **Email** | aiosmtplib (Gmail SMTP) | OTP verification |
+| **Translation** | langdetect + deep-translator | Multilingual support |
 | **Frontend** | React 18 + TypeScript + Vite | User interface |
 | **Styling** | TailwindCSS | Design system |
+| **Frontend Hosting** | Netlify | CDN + auto-deploy |
+| **Backend Hosting** | Render (Free Tier) | Container hosting |
 
 ---
 
@@ -749,26 +942,61 @@ GOOGLE_CLIENT_SECRET=your-secret
 
 ```
 backend/
-├── production_agentic.py    # 🧠 Main app + 10-layer RAG pipeline
-├── auth.py                  # 🔑 JWT + Google OAuth verification
-├── routes_auth.py           # 🔐 Auth endpoints (register, login, OTP, Google)
-├── routes_chat_history.py   # 💬 Chat session CRUD
-├── db_postgres.py           # 💾 PostgreSQL integration
-├── llm_provider.py          # 🤖 LLM abstraction (Gemini / Groq)
-├── email_service.py         # 📧 SMTP email service
-├── .env                     # ⚙️ Configuration
-└── frontend/
-    ├── src/
-    │   ├── contexts/AuthContext.tsx
-    │   ├── services/api.ts
-    │   └── pages/
-    │       ├── ChatPage.tsx
-    │       ├── LoginPage.tsx
-    │       ├── SignupPage.tsx
-    │       ├── ForgotPasswordPage.tsx
-    │       ├── DashboardPage.tsx
-    │       └── StudyMaterialsPage.tsx
-    └── index.html
+├── production_agentic.py       # 🧠 Main app: 10-layer RAG pipeline + all routes
+├── auth.py                     # 🔑 JWT verification + Google OAuth helper
+├── routes_auth.py              # 🔐 Auth endpoints (register, login, OTP, Google, reset)
+├── routes_chat_history.py      # 💬 Chat session CRUD
+├── routes_evaluation.py        # 📝 AI exam grading endpoints
+├── routes_progress.py          # 📊 Per-user learning progress dashboard
+├── routes_study_materials.py   # 📚 AI study material generation (5 tools)
+├── db_postgres.py              # 💾 PostgreSQL/NeonDB persistence layer
+├── llm_provider.py             # 🤖 LLM abstraction (Gemini / Groq) for RAG
+├── llm_eval_provider.py        # 🤖 LLM abstraction for evaluation (separate keys)
+├── email_service.py            # 📧 SMTP email service for OTP
+├── requirements.txt            # 📦 Full local dependencies (incl. PyTorch)
+├── requirements-render.txt     # 📦 Render deployment deps (fastembed, no PyTorch)
+├── start.sh                    # 🚀 Render start script
+├── netlify.toml                # 🌐 Netlify frontend build config
+├── .env.example                # ⚙️ Environment variable template
+├── .env                        # ⚙️ Active configuration (not committed)
+├── .gitignore                  # 🙈 Git ignore rules
+│
+├── screenshots/                # 📸 UI screenshots for README
+│   ├── chat_dashboard.png
+│   ├── login.png
+│   ├── signup.png
+│   ├── otp_verify.png
+│   ├── pdf_upload_autodetect.png
+│   ├── research_mode_answer.png
+│   ├── study_mode_guide.png
+│   ├── multilingual_hindi.png
+│   ├── progress_dashboard.png
+│   └── study_materials.png
+│
+└── frontend/                   # 🖥️ React + TypeScript + Vite App
+    ├── netlify.toml
+    ├── package.json
+    ├── tailwind.config.js
+    ├── vite.config.ts
+    └── src/
+        ├── main.tsx                          # App entry point
+        ├── App.tsx                           # Router + page layout
+        ├── index.css                         # Global styles
+        ├── contexts/
+        │   └── AuthContext.tsx               # JWT auth state management
+        ├── services/
+        │   └── api.ts                        # Centralized API client
+        ├── components/
+        │   ├── MarkdownRenderer.tsx          # Rich markdown rendering
+        │   └── ReplyPreview.tsx              # Chat reply preview
+        └── pages/
+            ├── ChatPage.tsx                  # Main chat + PDF upload interface
+            ├── LoginPage.tsx                 # Email/password + Google login
+            ├── SignupPage.tsx                # Registration with OTP verification
+            ├── ForgotPasswordPage.tsx        # Password reset flow
+            ├── DashboardPage.tsx             # Learning analytics dashboard
+            ├── StudyMaterialsPage.tsx        # AI study material generation
+            └── EvaluatePage.tsx              # AI exam answer evaluation
 ```
 
 ---
@@ -820,6 +1048,18 @@ backend/
 <p align="center">
   <img src="screenshots/study_materials.png" width="800" alt="Study Materials Page" />
 </p>
+
+---
+
+## 👥 Team
+
+Built at **KIIT University** as a Major Project (8th Semester).
+
+---
+
+## 📄 License
+
+This project is developed for academic purposes at KIIT University.
 
 ---
 
