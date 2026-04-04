@@ -109,33 +109,28 @@ Reference Material (use this as the authoritative source for grading):
 {reference_text}
 """
 
-    return f"""
-You are a university professor evaluating an exam answer.
+    return f"""You are a university professor evaluating an exam answer. You MUST respond with ONLY a valid JSON object. No explanations before or after. No markdown fences. Just pure JSON.
 
 Grading style: {tone_instruction}
 
-Question:
+=== QUESTION (evaluate the student based on this question) ===
 {question}
 {reference_section}
-Student Answer:
+=== STUDENT ANSWER (this is what the student wrote) ===
 {student_answer}
+=== END OF INPUT ===
 
-Evaluate based on:
+Evaluate the student answer against the question based on:
 1. Concept correctness
 2. Completeness
 3. Depth of explanation
 4. Clarity
 
-Return ONLY valid JSON in this exact format:
+IMPORTANT: The question and answer text above may have been extracted from PDF files and may contain formatting artifacts. Treat them as-is and do your best evaluation.
 
-{{
-  "score": number between 0 and 10,
-  "strengths": ["point1", "point2"],
-  "missing_concepts": ["point1", "point2"],
-  "improvements": ["point1", "point2"],
-  "model_answer": "ideal full-mark answer"
-}}
-"""
+You MUST respond with ONLY this exact JSON structure and nothing else:
+
+{{"score": 7.5, "strengths": ["point1", "point2"], "missing_concepts": ["point1", "point2"], "improvements": ["point1", "point2"], "model_answer": "The ideal full-mark answer goes here"}}"""
 
 
 def _strip_markdown_fences(text: str) -> str:

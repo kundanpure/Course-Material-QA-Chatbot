@@ -70,9 +70,16 @@ async def _eval_groq_generate(prompt: str) -> tuple:
     }
     payload = {
         "model": EVAL_GROQ_MODEL,
-        "messages": [{"role": "user", "content": prompt}],
+        "messages": [
+            {
+                "role": "system",
+                "content": "You are an exam evaluator. You MUST respond with ONLY valid JSON. No explanations, no markdown, no text outside the JSON object. If the input seems unclear, still produce your best evaluation as JSON."
+            },
+            {"role": "user", "content": prompt}
+        ],
         "temperature": 0.4,
         "max_tokens": 2048,
+        "response_format": {"type": "json_object"},
     }
 
     async with httpx.AsyncClient(timeout=60.0) as client:

@@ -737,7 +737,7 @@ async def generate_study_guide_with_gemini(
     full_context = "\n\n".join(page_blocks)
     total_pages  = max((c.get("page_num") or 0) for c in all_chunks)
 
-    study_prompt = f"""You are an expert academic tutor helping a student prepare for an examination.
+    study_prompt = f"""You are an expert academic tutor helping a student deeply understand their course material, prepare for exams, and solve practice problems.
 
 Document(s): {filenames}
 Total pages: {total_pages}
@@ -747,7 +747,13 @@ Here is the complete page-by-page content of the document:
 
 Student request: "{query}"
 
-Your task — provide a COMPREHENSIVE STUDY GUIDE with the following sections:
+=== INSTRUCTIONS ===
+1. If the Student request contains EXPLICIT formatting instructions (e.g., "Give answers in THIS STRICT FORMAT") or explicitly asks you to SOLVE, EVALUATE, or act as a specific persona (e.g., "university topper", "paper evaluator"):
+-> IGNORE the default study guide format below. Follow the Student's instructions PERFECTLY.
+-> You MUST use your own internal knowledge (parametric memory) to solve problems, evaluate answers, and provide detailed explanations that might not be explicitly written in the Document context. Use the Document primarily as the source of the questions/topics.
+
+2. OTHERWISE, if the Student request is a general study request (e.g., "help me study", "what are the important topics"):
+-> Provide a COMPREHENSIVE STUDY GUIDE with the following sections based ONLY on the document content:
 
 ## 📋 Table of Contents
 List ALL major topics / chapters found in this document with their page numbers.
@@ -765,9 +771,7 @@ Identify exactly 5 page numbers that contain the most exam-critical content. For
 List 8-10 bullet points of the most important definitions, formulas, or facts from the entire document.
 
 ## 📝 Suggested Reading Order
-Recommend the best order to read the document pages for exam preparation.
-
-Base your entire response on the document content above. Be specific with page numbers."""
+Recommend the best order to read the document pages for exam preparation."""
 
     start  = time.time()
     answer_text, tokens = await llm_generate(study_prompt)
@@ -1615,4 +1619,5 @@ if __name__ == "__main__":
     print(f"API Docs     : http://localhost:8000/docs")
     print("=" * 70)
 
-    uvicorn.run(app, host="0.0.0.0", port=8000, log_level="info")
+    port = int(os.getenv("PORT", 8000))
+    uvicorn.run(app, host="0.0.0.0", port=port, log_level="info")

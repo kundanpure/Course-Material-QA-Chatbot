@@ -1,0 +1,53 @@
+# ===== StudyAI — Render Deployment (Minimal) =====
+# Only includes packages ACTUALLY used by the backend
+
+# Core FastAPI
+fastapi==0.109.0
+uvicorn[standard]==0.27.0
+pydantic==2.5.3
+python-multipart==0.0.6
+
+# Database - PostgreSQL (NeonDB)
+asyncpg==0.29.0
+
+# LLM Providers
+groq==0.4.1
+google-generativeai==0.3.2
+
+# Embeddings & NLP — use CPU-only torch to save ~1.5GB
+--extra-index-url https://download.pytorch.org/whl/cpu
+torch==2.1.2+cpu
+sentence-transformers==2.3.1
+transformers==4.37.0
+numpy==1.26.3
+
+# RAG Pipeline
+faiss-cpu>=1.7.4
+rank-bm25>=0.2.2
+langdetect>=1.0.9
+deep-translator==1.11.4
+
+# Document Processing
+pypdf==4.0.0
+pdfplumber
+python-docx==1.1.0
+
+# Security & Auth
+python-jose[cryptography]==3.3.0
+passlib[bcrypt]==1.7.4
+bcrypt==4.1.2
+
+# HTTP & Async
+httpx==0.26.0
+aiosmtplib==3.0.1
+
+# Configuration
+python-dotenv==1.0.0
+
+# Data Validation
+email-validator==2.1.0.post1
+
+# ML Utilities
+scikit-learn
+scipy
+tqdm

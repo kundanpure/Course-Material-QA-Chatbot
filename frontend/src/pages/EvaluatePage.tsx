@@ -37,7 +37,7 @@ export default function EvaluatePage() {
   const [questionFile, setQuestionFile] = useState<File | null>(null);
   const [answerFile, setAnswerFile] = useState<File | null>(null);
 
-  const isDisabled = !question.trim() || !answer.trim() || loading;
+  const isDisabled = !question.trim() || !answer.trim() || loading || extractingQuestion || extractingAnswer;
 
   // ── Question file upload: extract text → populate textarea ─────────────────
   const handleQuestionFileChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
