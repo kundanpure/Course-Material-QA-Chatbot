@@ -117,3 +117,5 @@ tqdm
 regex
 
 aiosmtplib==3.0.1  # For sending emails asynchronously (e.g., notifications)
+pdfplumber
+python-docx

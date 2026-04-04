@@ -1,7 +1,7 @@
 """
 Auth Routes — Register (with OTP), Login, Verify Email, Google OAuth, Profile
 """
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel
 from typing import Optional
@@ -75,7 +75,7 @@ async def register(req: RegisterRequest):
         # If user exists but not verified, resend code
         if not existing.get("is_verified", False):
             otp = generate_otp()
-            expires = datetime.utcnow() + timedelta(minutes=10)
+            expires = datetime.now(timezone.utc) + timedelta(minutes=10)
             await db.set_verification_code(email, otp, expires)
             await send_verification_email(email, otp, existing.get("full_name", ""))
             return {
@@ -180,7 +180,7 @@ async def login(req: LoginRequest):
     if not user.get("is_verified", False):
         # Resend OTP automatically
         otp = generate_otp()
-        expires = datetime.utcnow() + timedelta(minutes=10)
+        expires = datetime.now(timezone.utc) + timedelta(minutes=10)
         await db.set_verification_code(user["email"], otp, expires)
         await send_verification_email(user["email"], otp, user.get("full_name", ""))
         raise HTTPException(403, "Email not verified. A new verification code has been sent.")

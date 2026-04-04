@@ -5,7 +5,7 @@ Includes Google OAuth token verification.
 """
 import os
 import httpx
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Optional, Dict
 
 from jose import JWTError, jwt
@@ -41,12 +41,12 @@ def verify_password(plain_password: str, hashed_password: str) -> bool:
 
 def create_jwt(user_id: int, email: str) -> str:
     """Create a JWT access token with user_id and email."""
-    expire = datetime.utcnow() + timedelta(hours=ACCESS_TOKEN_EXPIRE_HOURS)
+    expire = datetime.now(timezone.utc) + timedelta(hours=ACCESS_TOKEN_EXPIRE_HOURS)
     payload = {
         "sub": str(user_id),
         "email": email,
         "exp": expire,
-        "iat": datetime.utcnow(),
+        "iat": datetime.now(timezone.utc),
     }
     return jwt.encode(payload, SECRET_KEY, algorithm=ALGORITHM)
 
