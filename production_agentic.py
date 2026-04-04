@@ -29,7 +29,7 @@ import google.generativeai as genai
 from pypdf import PdfReader
 
 # Embeddings
-from sentence_transformers import SentenceTransformer
+from fastembed import TextEmbedding
 
 # FAISS Vector Index
 import faiss
@@ -65,15 +65,16 @@ if GEMINI_API_KEY:
 # ─── Embedding Service (singleton) ────────────────────────────────────────────
 
 class EmbeddingService:
-    """Loads sentence-transformer model once; thread-safe embedding generation."""
+    """Loads fastembed model once; thread-safe embedding generation."""
 
-    MODEL_NAME = "all-MiniLM-L6-v2"
+    MODEL_NAME = "sentence-transformers/all-MiniLM-L6-v2"
     _instance: Optional["EmbeddingService"] = None
 
     def __init__(self):
-        print(f"[EMBED] Loading model '{self.MODEL_NAME}'…")
-        self._model = SentenceTransformer(self.MODEL_NAME)
-        self._dim   = self._model.get_sentence_embedding_dimension()
+        print(f"[EMBED] Loading model '{self.MODEL_NAME}' in fastembed (no PyTorch)…")
+        # fastembed uses ONNX runtime, greatly saving memory
+        self._model = TextEmbedding(model_name=self.MODEL_NAME)
+        self._dim   = 384  # fixed dimension for all-MiniLM-L6-v2
         print(f"[EMBED] [OK] Model ready — dim={self._dim}")
 
     @classmethod
@@ -88,7 +89,9 @@ class EmbeddingService:
 
     def encode(self, texts: List[str]) -> np.ndarray:
         """Return float32 L2-normalised embedding matrix."""
-        vecs = self._model.encode(texts, convert_to_numpy=True, show_progress_bar=False)
+        # fastembed returns a generator of numpy arrays
+        vecs_list = list(self._model.embed(texts))
+        vecs = np.vstack(vecs_list)
         faiss.normalize_L2(vecs.astype(np.float32))
         return vecs.astype(np.float32)
 
