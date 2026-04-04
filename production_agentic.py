@@ -1109,6 +1109,8 @@ async def upload_document(file: UploadFile = File(...), session_id: Optional[int
 
         return result
 
+    except HTTPException as he:
+        raise he
     except Exception as e:
         print(f"[UPLOAD ERROR] {e}")
         import traceback; traceback.print_exc()
