@@ -8,6 +8,8 @@ python-multipart==0.0.6
 # ASGI Server
 gunicorn==21.2.0
 
+
+
 # Database - PostgreSQL
 asyncpg==0.29.0
 sqlalchemy[asyncio]==2.0.25
