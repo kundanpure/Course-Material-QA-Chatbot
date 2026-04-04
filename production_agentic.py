@@ -89,8 +89,12 @@ class EmbeddingService:
 
     def encode(self, texts: List[str]) -> np.ndarray:
         """Return float32 L2-normalised embedding matrix."""
+        if not texts:
+            return np.empty((0, self._dim), dtype=np.float32)
         # fastembed returns a generator of numpy arrays
         vecs_list = list(self._model.embed(texts))
+        if not vecs_list:
+            return np.empty((0, self._dim), dtype=np.float32)
         vecs = np.vstack(vecs_list)
         faiss.normalize_L2(vecs.astype(np.float32))
         return vecs.astype(np.float32)
@@ -1052,6 +1056,9 @@ async def upload_document(file: UploadFile = File(...), session_id: Optional[int
         doc_id = "doc_" + hashlib.sha256(content).hexdigest()[:12]
         chunks = chunk_text_hierarchical(pages, doc_id)
         print(f"[UPLOAD]       → {page_count} pages, {len(chunks)} chunks")
+        
+        if not chunks:
+            raise HTTPException(status_code=400, detail="Could not extract any text from the PDF. It might be a scanned image or completely empty.")
 
         # Layer 2: Generate embeddings
         print(f"[UPLOAD] [2/4] Generating embeddings…")

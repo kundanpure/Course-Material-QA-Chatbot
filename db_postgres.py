@@ -819,11 +819,11 @@ async def get_user_progress(user_id: int) -> Dict[str, Any]:
             # ── Study streak (consecutive days with activity)
             streak_rows = await conn.fetch(
                 """
-                SELECT DISTINCT DATE(created_at) as day
+                SELECT DISTINCT DATE(cm.created_at) as day
                 FROM chat_messages cm
                 JOIN chat_sessions cs ON cs.id = cm.session_id
                 WHERE cs.user_id = $1 AND cm.role = 'user'
-                ORDER BY day DESC
+                ORDER BY DATE(cm.created_at) DESC
                 """,
                 user_id,
             )
